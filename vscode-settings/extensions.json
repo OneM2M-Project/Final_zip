@@ -1,0 +1,10 @@
+{
+  "recommendations": [
+    "platformio.platformio-ide",
+    "ms-python.python",
+    "ms-azuretools.vscode-docker",
+    "ms-vscode-remote.remote-ssh",
+    "ms-kubernetes-tools.vscode-kubernetes-tools",
+    "humao.rest-client"
+  ]
+}

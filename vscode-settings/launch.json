@@ -1,0 +1,24 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    { "name": "0. train (YOLOv8n)", "type": "debugpy", "request": "launch", "program": "train/train.py",
+      "cwd": "${workspaceFolder}", "envFile": "${workspaceFolder}/.env", "console": "integratedTerminal" },
+    { "name": "1. ACME MN-CSE", "type": "debugpy", "request": "launch", "module": "acmecse",
+      "args": ["--headless"], "cwd": "${workspaceFolder}/cse", "console": "integratedTerminal" },
+    { "name": "2. setup base", "type": "debugpy", "request": "launch", "program": "setup/setup_resources.py",
+      "args": ["base"], "cwd": "${workspaceFolder}", "envFile": "${workspaceFolder}/.env", "console": "integratedTerminal" },
+    { "name": "3. gateway", "type": "debugpy", "request": "launch", "program": "gateway/gateway.py",
+      "cwd": "${workspaceFolder}", "envFile": "${workspaceFolder}/.env", "console": "integratedTerminal" },
+    { "name": "4. image_source", "type": "debugpy", "request": "launch", "program": "gateway/image_source.py",
+      "cwd": "${workspaceFolder}", "envFile": "${workspaceFolder}/.env", "console": "integratedTerminal" },
+    { "name": "5. AI (PC)", "type": "debugpy", "request": "launch", "program": "ai/app.py",
+      "cwd": "${workspaceFolder}", "envFile": "${workspaceFolder}/.env", "console": "integratedTerminal" },
+    { "name": "6. dashboard", "type": "debugpy", "request": "launch", "module": "streamlit",
+      "args": ["run", "dashboard/app.py"], "cwd": "${workspaceFolder}", "envFile": "${workspaceFolder}/.env", "console": "integratedTerminal" },
+    { "name": "7. setup subs", "type": "debugpy", "request": "launch", "program": "setup/setup_resources.py",
+      "args": ["subs"], "cwd": "${workspaceFolder}", "envFile": "${workspaceFolder}/.env", "console": "integratedTerminal" }
+  ],
+  "compounds": [
+    { "name": "X-Guard 전체 (CSE 먼저 켜고 setup base 후)", "configurations": ["3. gateway", "4. image_source", "5. AI (PC)", "6. dashboard"] }
+  ]
+}

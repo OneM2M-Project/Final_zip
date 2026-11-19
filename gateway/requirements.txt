@@ -1,0 +1,6 @@
+pyserial>=3.5
+paho-mqtt>=2.0
+requests>=2.31
+flask>=3.0
+pillow>=10.0
+opencv-python>=4.8   # IMAGE_SOURCE=camera

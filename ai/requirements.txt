@@ -1,0 +1,8 @@
+# CPU용 PyTorch는 Dockerfile에서 따로 설치해요(용량 절약). PC에서 직접 돌릴 땐:
+#   pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
+flask>=3.0
+requests>=2.31
+pillow>=10.0
+numpy>=1.26
+# MODEL_BACKEND=ultralytics 를 쓸 때만:
+# ultralytics>=8.2

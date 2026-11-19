@@ -1,0 +1,282 @@
+/*
+ * X-Guard 컨베이어 컨트롤러 - Arduino Uno R3 (부품표 'X-Guard_부품표_최종' 기준)
+ *
+ * 배선 (부품표 '주의사항·배선' 시트)
+ *   D2  제품 감지 센서 E18-D80NK 출력 (INT0)   갈색 5V, 파랑 GND, 검정 신호 (NPN: 감지 시 LOW, 내부 풀업 사용)
+ *   D3  벨트 위치 센서 TCRT5000 DO (INT1)      벨트에 붙인 흰/검 줄무늬 경계를 셈 (펄스 = 경계 1개)
+ *   D6  릴레이 (비상정지 때 컨베이어 전원 차단, 달았을 때만 USE_RELAY = true)
+ *   D9  리젝터 서보 MG996R 신호                전원은 5V 3A 어댑터 따로, GND만 아두이노와 공통,
+ *                                              서보 전원 +/- 에 1000uF 커패시터 (극성 주의)
+ *   D12 비상정지 버튼 (택트 스위치, 다른 쪽 다리는 GND. 내부 풀업 사용)
+ *   D13 상태 LED (켜짐 = 가동, 깜빡임 = 정지)
+ *   ※ IR 조명(850nm LED-36)은 12V 어댑터로 따로 켜요. 아두이노와 연결하지 않아요.
+ *   ※ Servo 라이브러리가 Timer1 을 써서 D9, D10 에서는 analogWrite 가 안 돼요 (여기선 안 씀).
+ *   ※ 카메라(ELP OV9281)는 노트북 USB 에 바로 연결. 아두이노는 신호만 주고받아요.
+ *
+ * 시리얼 115200bps, 한 줄에 한 메시지 ('\n' 끝)
+ *   보냄  DET,<seq>,<pulse>       제품 감지, 그때 벨트 누적 펄스      예) DET,17,10432
+ *         REJ,<seq>,DONE          NG 판정이라 배출 완료
+ *         REJ,<seq>,TIMEOUT       리젝터에 왔는데 판정이 아직 없음 -> 안전하게 배출 (fail-safe)
+ *         PASS,<seq>              OK 판정이라 통과
+ *         STATUS,RUNNING|STOPPED
+ *         CNT,<pulse>             (보정용) CNT 명령에 대한 응답
+ *   받음  OK,<seq> / NG,<seq>     판정 (예전 형식 V,<seq>,P|F 도 받음)
+ *         STOP / START            비상 정지 / 재시작
+ *         T1                      (시험용) 제품 감지 흉내
+ *         T2                      (시험용) 맨 앞 제품을 지금 리젝터에 온 것으로 처리
+ *         CNT                     (보정용) 현재 누적 펄스 -> 벨트를 정확히 300mm 보내기 전후 차이로
+ *                                 MM_PER_PULSE = 300 / (뒤 - 앞)
+ *
+ * 감지 센서와 리젝터 사이에 여러 제품이 동시에 있을 수 있어서, 감지 순서대로 대기열(FIFO)에 넣고
+ * 맨 앞 제품이 감지 위치에서 REJECT_PULSES 만큼 이동하면 판정대로 처리해요.
+ * (센서~리젝터 거리 / 벨트 속도) 가 AI 판정 시간(이미지 업로드 + 추론)보다 길어야 해요.
+ */
+#include <Arduino.h>
+#include <Servo.h>
+
+// ---------------- 핀 ----------------
+const uint8_t PIN_DET = 2;     // E18-D80NK (INT0)
+const uint8_t PIN_BELT = 3;    // TCRT5000 (INT1)
+const uint8_t PIN_RELAY = 6;
+const uint8_t PIN_SERVO = 9;
+const uint8_t PIN_ESTOP = 12;
+const uint8_t PIN_LED = 13;
+
+// ---------------- 조립 후 측정해서 바꾸는 값 ----------------
+const float MM_PER_PULSE = 5.0;             // 줄무늬 경계 1개당 벨트 이동 거리(mm). CNT 로 측정
+const float SENSOR_TO_REJECTOR_MM = 250.0;  // 감지 센서 ~ 리젝터 팔 거리(mm)
+const uint32_t REJECT_PULSES = (uint32_t)(SENSOR_TO_REJECTOR_MM / MM_PER_PULSE + 0.5);
+
+// 벨트 센서를 아직 안 달았으면 false -> 시간으로 계산 (속도조절 노브를 고정한 뒤 잰 값)
+const bool USE_BELT_SENSOR = true;
+const unsigned long TRAVEL_MS = 3000;       // 감지 ~ 리젝터 이동 시간(ms) = 거리 / 벨트 속도
+
+// ---------------- 센서 / 출력 설정 ----------------
+const bool DET_ACTIVE_LOW = true;           // E18-D80NK(NPN)는 감지 시 LOW
+const unsigned long DET_GAP_MS = 300;       // 한 제품이 두 번 잡히지 않게 (제품 간격보다 짧게)
+const unsigned long BELT_MIN_US = 2000;     // 줄무늬 경계 떨림 무시
+const bool USE_RELAY = false;               // 릴레이를 달았으면 true
+const bool RELAY_ACTIVE_HIGH = true;        // HIGH 일 때 컨베이어 전원이 연결되는 모듈이면 true
+const int SERVO_REST = 10;                  // 대기 각도
+const int SERVO_PUSH = 100;                 // 밀어내는 각도
+const unsigned long PUSH_HOLD_MS = 350;     // 밀고 있는 시간
+const unsigned long ESTOP_DEBOUNCE_MS = 50;
+
+// ---------------- 인터럽트에서 바뀌는 값 ----------------
+volatile uint32_t beltPulses = 0;
+volatile unsigned long lastBeltUs = 0;
+volatile bool detFlag = false;
+volatile uint32_t detPulse = 0;
+volatile unsigned long detMs = 0;
+volatile unsigned long lastDetMs = 0;
+
+void isrBelt() {  // 흰<->검 경계마다
+  unsigned long now = micros();
+  if (now - lastBeltUs >= BELT_MIN_US) {
+    lastBeltUs = now;
+    beltPulses++;
+  }
+}
+
+void isrDet() {  // 감지 시작 순간
+  unsigned long now = millis();
+  if (now - lastDetMs >= DET_GAP_MS) {
+    lastDetMs = now;
+    detPulse = beltPulses;
+    detMs = now;
+    detFlag = true;
+  }
+}
+
+uint32_t pulsesNow() {
+  noInterrupts();
+  uint32_t p = beltPulses;
+  interrupts();
+  return p;
+}
+
+// ---------------- 대기열 ----------------
+const uint8_t QSIZE = 16;
+struct Item {
+  uint16_t seq;
+  uint32_t pulse;    // 감지 때 누적 펄스
+  unsigned long ms;  // 감지 시각
+  char verdict;      // '?' 아직 없음, 'P' 통과, 'F' 배출
+};
+Item q[QSIZE];
+uint8_t qHead = 0, qCount = 0;
+
+uint16_t seqNo = 0;
+bool running = true;
+Servo rejector;
+unsigned long pushUntil = 0;  // 0 이면 대기 자세
+
+char rx[32];
+uint8_t rxLen = 0;
+
+void qPush(uint16_t s, uint32_t p, unsigned long ms) {
+  if (qCount == QSIZE) {  // 넘치면 가장 오래된 것을 버림
+    qHead = (qHead + 1) % QSIZE;
+    qCount--;
+  }
+  q[(qHead + qCount) % QSIZE] = {s, p, ms, '?'};
+  qCount++;
+}
+
+bool qPop(Item &out) {
+  if (qCount == 0) return false;
+  out = q[qHead];
+  qHead = (qHead + 1) % QSIZE;
+  qCount--;
+  return true;
+}
+
+void setVerdict(uint16_t s, char v) {
+  for (uint8_t i = 0; i < qCount; i++) {
+    Item &it = q[(qHead + i) % QSIZE];
+    if (it.seq == s) {
+      it.verdict = v;
+      return;
+    }
+  }
+}
+
+// 맨 앞 제품이 리젝터에 왔나
+bool frontAtRejector() {
+  if (qCount == 0) return false;
+  const Item &it = q[qHead];
+  if (USE_BELT_SENSOR) return pulsesNow() - it.pulse >= REJECT_PULSES;
+  return millis() - it.ms >= TRAVEL_MS;
+}
+
+// ---------------- 동작 ----------------
+void sendStatus() {
+  Serial.print(F("STATUS,"));
+  Serial.println(running ? F("RUNNING") : F("STOPPED"));
+}
+
+void setRunning(bool on) {
+  running = on;
+  if (USE_RELAY) digitalWrite(PIN_RELAY, (on == RELAY_ACTIVE_HIGH) ? HIGH : LOW);
+  sendStatus();
+}
+
+void push() {  // 기다리지 않고 밀기 시작 (loop 에서 되돌림)
+  rejector.write(SERVO_PUSH);
+  pushUntil = millis() + PUSH_HOLD_MS;
+  if (pushUntil == 0) pushUntil = 1;
+}
+
+void onDetect(uint32_t pulse, unsigned long ms) {
+  if (!running) return;
+  seqNo++;
+  qPush(seqNo, pulse, ms);
+  Serial.print(F("DET,"));
+  Serial.print(seqNo);
+  Serial.print(',');
+  Serial.println(pulse);
+}
+
+void onRejector() {
+  Item it;
+  if (!qPop(it)) return;
+  if (it.verdict == 'P') {
+    Serial.print(F("PASS,"));
+    Serial.println(it.seq);
+  } else {
+    push();  // NG 또는 판정 없음 -> 배출
+    Serial.print(F("REJ,"));
+    Serial.print(it.seq);
+    Serial.println(it.verdict == 'F' ? F(",DONE") : F(",TIMEOUT"));
+  }
+}
+
+void handleLine(char *line) {
+  while (*line == ' ') line++;  // 앞뒤 공백 제거
+  for (int i = (int)strlen(line) - 1; i >= 0 && line[i] == ' '; i--) line[i] = 0;
+  if (!*line) return;
+
+  if (!strncmp(line, "OK,", 3) || !strncmp(line, "NG,", 3)) {  // OK,17 / NG,17
+    setVerdict(atoi(line + 3), line[0] == 'O' ? 'P' : 'F');
+  } else if (!strncmp(line, "V,", 2)) {  // 예전 형식 V,17,F
+    char *c2 = strchr(line + 2, ',');
+    if (c2 && (c2[1] == 'P' || c2[1] == 'F')) setVerdict(atoi(line + 2), c2[1]);
+  } else if (!strcmp(line, "STOP")) {
+    setRunning(false);
+  } else if (!strcmp(line, "START")) {
+    setRunning(true);
+  } else if (!strcmp(line, "T1")) {
+    onDetect(pulsesNow(), millis());
+  } else if (!strcmp(line, "T2")) {
+    onRejector();
+  } else if (!strcmp(line, "CNT")) {
+    Serial.print(F("CNT,"));
+    Serial.println(pulsesNow());
+  }
+}
+
+// 비상정지 버튼: 누를 때마다 정지 <-> 가동
+void checkEstop() {
+  static bool stable = HIGH, last = HIGH;
+  static unsigned long changedAt = 0;
+  bool raw = digitalRead(PIN_ESTOP);
+  if (raw != last) {
+    last = raw;
+    changedAt = millis();
+  }
+  if (millis() - changedAt >= ESTOP_DEBOUNCE_MS && raw != stable) {
+    stable = raw;
+    if (stable == LOW) setRunning(!running);
+  }
+}
+
+void setup() {
+  Serial.begin(115200);
+  pinMode(PIN_DET, DET_ACTIVE_LOW ? INPUT_PULLUP : INPUT);
+  pinMode(PIN_BELT, INPUT);  // TCRT5000 모듈은 출력단(비교기)이 있어서 풀업 불필요
+  pinMode(PIN_ESTOP, INPUT_PULLUP);
+  pinMode(PIN_LED, OUTPUT);
+  if (USE_RELAY) pinMode(PIN_RELAY, OUTPUT);
+  rejector.attach(PIN_SERVO);
+  rejector.write(SERVO_REST);
+  attachInterrupt(digitalPinToInterrupt(PIN_DET), isrDet, DET_ACTIVE_LOW ? FALLING : RISING);
+  if (USE_BELT_SENSOR) attachInterrupt(digitalPinToInterrupt(PIN_BELT), isrBelt, CHANGE);
+  setRunning(true);
+}
+
+void loop() {
+  // 1) 시리얼 수신
+  while (Serial.available()) {
+    char c = Serial.read();
+    if (c == '\n') {
+      rx[rxLen] = 0;
+      handleLine(rx);
+      rxLen = 0;
+    } else if (c != '\r' && rxLen < sizeof(rx) - 1) {
+      rx[rxLen++] = c;
+    }
+  }
+
+  // 2) 제품 감지 (인터럽트가 잡아 둔 것)
+  if (detFlag) {
+    noInterrupts();
+    uint32_t p = detPulse;
+    unsigned long ms = detMs;
+    detFlag = false;
+    interrupts();
+    onDetect(p, ms);
+  }
+
+  // 3) 리젝터 위치 도착 (앞에서부터 차례로)
+  while (frontAtRejector()) onRejector();
+
+  // 4) 서보 되돌리기
+  if (pushUntil && (long)(millis() - pushUntil) >= 0) {
+    rejector.write(SERVO_REST);
+    pushUntil = 0;
+  }
+
+  // 5) 비상정지 버튼, LED
+  checkEstop();
+  digitalWrite(PIN_LED, running ? HIGH : ((millis() / 300) % 2));
+}

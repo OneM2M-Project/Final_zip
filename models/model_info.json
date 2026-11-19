@@ -1,0 +1,15 @@
+{
+  "time": "2026-11-19 11:15",
+  "classes": [
+    "defect"
+  ],
+  "torchscript": true,
+  "name": "yolov8n_400_single_b16",
+  "model": "yolov8n",
+  "imgsz": 640,
+  "epochs": 30,
+  "images": 400,
+  "mAP50": 0.9613,
+  "mAP50_95": 0.6267,
+  "fingerprint": "a0d34e900baa31ec37a33af3934b0019"
+}

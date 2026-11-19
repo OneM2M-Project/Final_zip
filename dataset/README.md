@@ -1,0 +1,3 @@
+시연용 X-ray 이미지를 이름순으로 넣어 주세요. seq 1번 = 첫 번째 파일, 끝나면 처음부터 반복.
+예) 01_normal.jpg, 02_knife.jpg, 03_normal.jpg, 04_gun.jpg ...
+(파일 이름에 클래스 이름을 넣어 두면 MODEL_BACKEND=dummy 로 모델 없이도 흐름을 시험할 수 있어요.)

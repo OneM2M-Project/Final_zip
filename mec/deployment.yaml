@@ -1,0 +1,35 @@
+# MEC Sandbox VM에서:  kubectl -n <SANDBOX_NS> apply -f mec/
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: xguard-ai
+  labels: {app: xguard-ai}
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: xguard-ai}
+  template:
+    metadata:
+      labels: {app: xguard-ai}
+    spec:
+      containers:
+        - name: xguard-ai
+          image: <dockerhub-id>/xguard-ai:1.0     # docker push 한 이미지 이름으로 바꾸세요
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 9000
+          env:
+            - {name: CSE_URL, value: "http://<PC_IP>:8080"}   # 시연 PC의 MN-CSE
+            - {name: CSE_RN, value: "cse-mn"}
+            - {name: AI_PORT, value: "9000"}
+            - {name: MODEL_BACKEND, value: "torchscript"}
+            - {name: CONF_TH, value: "0.5"}
+            - {name: MODEL_VER, value: "yolov8n-xguard-1.0"}
+            - {name: RESULT_MODE, value: "flex"}
+          resources:
+            requests: {cpu: "1", memory: "1Gi"}
+            limits: {cpu: "2", memory: "2Gi"}
+          readinessProbe:
+            httpGet: {path: /health, port: 9000}
+            initialDelaySeconds: 10
+            periodSeconds: 10

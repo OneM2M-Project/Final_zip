@@ -1,0 +1,12 @@
+dataset/
+dashboard/
+arduino/
+cse/
+docs/
+**/__pycache__
+.vscode/
+.env
+train/
+captures/
+logs/
+.venv/

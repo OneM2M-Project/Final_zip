@@ -1,0 +1,151 @@
+"""X-Guard 대시보드 (Dashboard, CDashboard).
+
+⑩ defects 구독 알림을 9100/notify 로 받아 실시간 경보를 띄우고,
+   discovery(lbl=type:defect)로 불량 이력, lineStatus/la 로 라인 상태를 보여줘요.
+   비상 정지/재시작은 lineA-devices 그룹의 fopt 로 보내요.
+
+실행: streamlit run dashboard/app.py   (화면 http://localhost:8501)
+"""
+import base64
+import io
+import os
+import sys
+import threading
+import time
+from collections import deque
+from pathlib import Path
+
+import streamlit as st
+from flask import Flask, request
+from PIL import Image, ImageDraw
+
+ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT))
+from common import m2m  # noqa: E402
+
+ORIG = "CDashboard"
+NOTIFY_PORT = int(os.getenv("DASH_NOTIFY_PORT", "9100"))
+
+
+# ---------------------------------------------------------------- 알림 수신기 (한 번만 시작)
+@st.cache_resource
+def notify_server():
+    alerts = deque(maxlen=50)
+    srv = Flask("dash-notify")
+
+    @srv.post("/notify")
+    @srv.post("/notify/<path:_rest>")  # ACME는 nu 경로를 poa 뒤에 붙여 보낼 수 있어요
+    def notify(_rest=None):
+        rep, _, vrq = m2m.parse_notification(request.get_json(silent=True))
+        if not vrq:
+            con = m2m.content_of(rep)
+            if con:
+                alerts.appendleft({**con, "_rx": time.strftime("%H:%M:%S")})
+        return m2m.notify_ok()
+
+    threading.Thread(target=lambda: srv.run(host="0.0.0.0", port=NOTIFY_PORT, threaded=True),
+                     daemon=True).start()
+    return alerts
+
+
+# ---------------------------------------------------------------- oneM2M 조회
+def get_json(path, **params):
+    try:
+        r = m2m.retrieve(path, ORIG, **params)
+        return r.json() if m2m.rsc(r) == 2000 else None
+    except Exception:
+        return None
+
+
+def line_status():
+    j = get_json("LineSensor-01/lineStatus/la")
+    return m2m.content_of(j) if j else None
+
+
+def defect_history(limit=30):
+    """discovery로 type:defect 라벨 컨테이너를 찾고, 그 안의 cin 목록을 가져와요."""
+    uris = (get_json("", fu=1, lbl="type:defect", ty=3) or {}).get("m2m:uril", [])
+    rows = []
+    for u in uris:
+        j = get_json(u, rcn=4, ty=4, lim=limit) or {}
+        for cin in j.get("m2m:cnt", {}).get("m2m:cin", []):
+            con = m2m.content_of({"m2m:cin": cin})
+            if con:
+                rows.append({**con, "ct": cin.get("ct", "")})
+    return sorted(rows, key=lambda r: r.get("seq", 0), reverse=True)[:limit]
+
+
+def image_of(seq):
+    j = get_json("ImageSource-01/xrayImages", rcn=4, ty=4, lim=100) or {}
+    for cin in j.get("m2m:cnt", {}).get("m2m:cin", []):
+        con = m2m.content_of({"m2m:cin": cin}) or {}
+        if con.get("seq") == seq:
+            return Image.open(io.BytesIO(base64.b64decode(con["img"]))).convert("RGB")
+    return None
+
+
+def draw_boxes(img, boxes):
+    d = ImageDraw.Draw(img)
+    for x1, y1, x2, y2, conf, cls in boxes:
+        d.rectangle([x1, y1, x2, y2], outline=(230, 40, 40), width=3)
+        d.text((x1 + 3, max(y1 - 12, 0)), f"{cls} {conf:.2f}", fill=(230, 40, 40))
+    return img
+
+
+def send_group(cmd):
+    r = m2m.add_cin("lineA-devices/fopt", ORIG, {"cmd": cmd})
+    return m2m.rsc(r), r.text[:200]
+
+
+# ---------------------------------------------------------------- 화면
+st.set_page_config(page_title="X-Guard", page_icon="🛡️", layout="wide")
+alerts = notify_server()
+st.title("X-Guard 컨베이어 이물질 검사")
+
+c1, c2, _ = st.columns([1, 1, 4])
+if c1.button("⛔ 비상 정지", type="primary", use_container_width=True):
+    code, txt = send_group("STOP")
+    st.toast(f"STOP 전송 rsc={code}" if code == 2000 else f"실패 {code} {txt}")
+if c2.button("▶ 재시작", use_container_width=True):
+    code, txt = send_group("START")
+    st.toast(f"START 전송 rsc={code}" if code == 2000 else f"실패 {code} {txt}")
+
+
+@st.fragment(run_every=2)
+def live():
+    s = line_status()
+    m1, m2_, m3, m4 = st.columns(4)
+    if s:
+        m1.metric("라인", "가동 중" if s.get("running") else "정지")
+        m2_.metric("통과 수", s.get("count", 0))
+        m3.metric("마지막 번호", s.get("lastSeq", 0))
+    else:
+        m1.metric("라인", "연결 안 됨")
+    m4.metric("실시간 불량 경보", len(alerts))
+
+    left, right = st.columns([3, 2])
+    with left:
+        st.subheader("불량 이력 (discovery: type:defect)")
+        hist = defect_history()
+        if hist:
+            st.dataframe([{k: r.get(k) for k in ("seq", "productId", "defectClass", "confidence",
+                                                  "inferenceMs", "modelVer")} for r in hist],
+                         use_container_width=True, hide_index=True)
+        else:
+            st.caption("아직 불량이 없어요.")
+    with right:
+        st.subheader("최근 경보")
+        if alerts:
+            a = alerts[0]
+            st.error(f"#{a.get('seq')} {a.get('productId')} — {a.get('defectClass')} "
+                     f"({a.get('confidence')}) {a.get('_rx')}")
+            img = image_of(a.get("seq"))
+            if img:
+                st.image(draw_boxes(img, a.get("boxes", [])), use_container_width=True)
+            for b in list(alerts)[1:6]:
+                st.write(f"#{b.get('seq')} {b.get('defectClass')} {b.get('confidence')} · {b.get('_rx')}")
+        else:
+            st.caption(f"defects 알림 대기 중 (:{NOTIFY_PORT}/notify)")
+
+
+live()

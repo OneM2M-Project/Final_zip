@@ -52,7 +52,7 @@ const uint8_t PIN_LED = 13;
 const int SERVO_REST = 10;                // 날개 대기 각도 (벨트 가장자리)
 const int SERVO_PUSH = 100;               // 날개 미는 각도 (벨트 가로질러)
 const unsigned long PUSH_DELAY_MS = 0;    // S2 감지 -> 날개 앞 도착까지 시간. S2 가 날개 바로 앞이면 0
-const unsigned long PUSH_HOLD_MS = 800;   // 밀고 있는 시간 (끝까지 간 뒤 버티는 시간)
+const unsigned long PUSH_HOLD_MS = 5000;   // 밀고 있는 시간 (끝까지 간 뒤 버티는 시간)
 const int SERVO_STEP_DEG = 3;             // 한 번에 움직이는 각도 (작을수록 순간 전류가 작아요)
 const unsigned long SERVO_STEP_MS = 10;   // 한 걸음 사이 시간 (90도 ≈ 0.3초)
 const int SERVO_MIN_US = 500, SERVO_MAX_US = 2500;  // MG996R 펄스 폭
@@ -120,6 +120,10 @@ bool sensorHit(Sensor &s) {
   }
   if (now - s.changedAt >= DEBOUNCE_MS && raw != s.stable) {
     s.stable = raw;
+    // 확인용: 센서 값이 바뀔 때마다 알려줘요 -> logs/gateway.log 에 "아두이노: RAW,S1,L" 로 남아요
+    Serial.print(F("RAW,S"));
+    Serial.print(s.pin == PIN_S1 ? 1 : 2);
+    Serial.println(raw ? F(",H") : F(",L"));
     if (s.stable != s.idle && now - s.lastHitAt >= DET_GAP_MS) {
       s.lastHitAt = now;
       return true;

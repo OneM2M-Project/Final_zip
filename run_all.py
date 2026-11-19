@@ -41,12 +41,21 @@ def port_open(port, host="127.0.0.1"):
         return s.connect_ex((host, port)) == 0
 
 
-def wait_port(port, name, timeout=60):
+def wait_port(port, name, timeout=60, proc=None, log=None):
+    """port 가 열릴 때까지 기다려요. proc 가 중간에 죽으면 바로 멈추고 로그 끝부분을 보여줘요."""
     t0 = time.time()
     while time.time() - t0 < timeout:
         if port_open(port):
             print(f"  ✓ {name} (:{port})")
             return True
+        if proc is not None and proc.poll() is not None:
+            print(f"  ✗ {name} 프로그램이 켜지다가 꺼졌어요 (코드 {proc.returncode}).")
+            if log and (LOGS / log).exists():
+                tail = (LOGS / log).read_text(encoding="utf-8", errors="replace").strip().splitlines()[-8:]
+                print("    --- logs/" + log + " 끝부분 ---")
+                for t in tail:
+                    print("    " + t)
+            return False
         time.sleep(0.5)
     print(f"  ✗ {name} (:{port}) 가 {timeout}초 안에 안 켜졌어요. logs/ 를 확인하세요.")
     return False
@@ -99,6 +108,22 @@ def ai_health():
         print(f"  {mark} AI 모델: {h.get('model')} ({h.get('backend')}) 버전={h.get('modelVer')} 클래스={h.get('classes')}")
     except Exception as e:
         print(f"  ! AI 상태 확인 실패: {e!r} -> logs/ai.log 를 확인하세요")
+
+
+def cse_db_broken():
+    """ACME DB(tinydb) 에 ct/ty 가 빠진 반쪽짜리 리소스가 있으면 True.
+    이런 기록이 있는 컨테이너가 가득 차면(mni) 오래된 것을 지우다가 ACME 가 5000 오류를 내요."""
+    import glob
+    import json
+    for f in glob.glob(str(ROOT / "cse" / "data" / "resources-*.json")):
+        try:
+            res = json.loads(Path(f).read_text(encoding="utf-8")).get("resources", {})
+        except (ValueError, OSError):
+            return True  # 파일 자체가 깨졌으면 비우는 게 맞아요
+        for v in res.values():
+            if isinstance(v, dict) and v.get("__rtype__") and ("ct" not in v or "ty" not in v):
+                return True
+    return False
 
 
 def has_module(name):
@@ -181,6 +206,10 @@ def main():
     if not reset and (not owner.exists() or owner.read_text(encoding="utf-8").strip() != me):
         print(f"  이 PC({me})에서 처음 쓰는 CSE DB라 예전 기록을 비우고 시작해요 (--db-reset)")
         reset = True
+    if not reset and cse_db_broken():
+        print("  ! CSE DB 에 반쯤 저장된 기록이 있어요 (창을 강제로 닫았을 때 생겨요). "
+              "그대로 두면 lineStatus 저장이 5000 오류로 실패해서 대시보드 검사 수가 안 올라가요 -> DB 를 비우고 시작해요")
+        reset = True
     acme_args = [PY, "-m", "acmecse", "--headless"] + (["--db-reset"] if reset else [])
     start("acme", acme_args, cwd=ROOT / "cse")
     if not wait_port(8080, "MN-CSE HTTP", 60):
@@ -215,8 +244,8 @@ def main():
         print("  ! opencv 가 없어서 카메라 대신 dataset/ 사진을 써요 -> pip install opencv-python")
     # 받는 쪽부터 순서대로 켜요. 게이트웨이(아두이노)를 먼저 켜면 AI가 모델을 읽는 동안
     # 들어온 제품 사진을 AI가 못 받아서 TIMEOUT 이 나요.
-    start("ai", [PY, "ai/app.py"], env=ai_env)
-    if not wait_port(int(os.getenv("AI_PORT", "9000")), "AI AE (모델 로드 포함)", 300):
+    ai_proc = start("ai", [PY, "ai/app.py"], env=ai_env)
+    if not wait_port(int(os.getenv("AI_PORT", "9000")), "AI AE (모델 로드 포함)", 300, ai_proc, "ai.log"):
         return
     start("image_source", [PY, "gateway/image_source.py"])
     wait_port(int(os.getenv("IMAGE_PORT", "9200")), "이미지 AE", 60)
@@ -246,14 +275,20 @@ def main():
 
 
 def stop_all():
-    for name, p in reversed(procs):
-        if p.poll() is None:
-            p.terminate()
-    for name, p in procs:
-        try:
-            p.wait(5)
-        except subprocess.TimeoutExpired:
-            p.kill()
+    # 요청을 보내는 프로그램들을 먼저 끄고, ACME(DB 를 쓰는 쪽)는 맨 나중에 꺼요.
+    # 한꺼번에 끄면 ACME 가 저장하던 기록이 반쪽만 남아 다음 실행 때 5000 오류가 나요.
+    first = [(n, p) for n, p in procs if n not in ("acme", "mqtt")]
+    last = [(n, p) for n, p in procs if n in ("acme", "mqtt")]
+    for group in (list(reversed(first)), last):
+        for name, p in group:
+            if p.poll() is None:
+                p.terminate()
+        for name, p in group:
+            try:
+                p.wait(5)
+            except subprocess.TimeoutExpired:
+                p.kill()
+        time.sleep(1)
     print("전부 껐어요.")
 
 

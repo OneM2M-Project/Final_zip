@@ -140,6 +140,16 @@ def decode_output(out):
 
 
 # ====================================================================== 모델
+def is_torchscript(path):
+    """torch.jit.save 로 만든 파일이면 True (ultralytics best.pt 는 False)."""
+    import zipfile
+    try:
+        with zipfile.ZipFile(path) as z:
+            return any(n.endswith("constants.pkl") for n in z.namelist())
+    except (zipfile.BadZipFile, OSError):
+        return False
+
+
 class Detector:
     def __init__(self):
         global MODEL_VER
@@ -153,7 +163,16 @@ class Detector:
             return
         if not MODEL_PATH.exists():
             raise FileNotFoundError(f"모델 파일이 없어요: {MODEL_PATH}")
-        if BACKEND != "ultralytics":
+        # .env 의 MODEL_BACKEND 보다 실제 파일 종류를 따라요.
+        # (detect.pt = TorchScript, best.pt = ultralytics 체크포인트. 잘못 고르면 AI가 켜지다 죽어요)
+        ts = is_torchscript(MODEL_PATH)
+        if ts and self.backend == "ultralytics":
+            print(f"{MODEL_PATH.name} 은 TorchScript 라서 MODEL_BACKEND=ultralytics 대신 torchscript 로 읽어요", flush=True)
+            self.backend = "torchscript"
+        elif not ts and self.backend != "ultralytics":
+            print(f"{MODEL_PATH.name} 은 ultralytics 체크포인트라 ultralytics 로 읽어요", flush=True)
+            self.backend = "ultralytics"
+        if self.backend != "ultralytics":
             import torch
             torch.set_grad_enabled(False)
             try:
@@ -175,9 +194,16 @@ class Detector:
                 base = ""
             self.arch = base
         if MODEL_VER.strip().lower() in ("", "auto"):
-            # .env 의 MODEL_VER=auto 면 실제로 읽은 파일에서 이름을 만들어요 (예: yolov8m-detect-1116)
+            # .env 의 MODEL_VER=auto 면 실제로 읽은 파일에서 이름을 만들어요
+            #   model_info.json 에 name 이 있으면 그 이름 (예: yolov8n_400_single_b16), 없으면 yolov8m-detect-1116 처럼
+            info_name = ""
+            if MODEL_INFO.exists():
+                try:
+                    info_name = str(json.loads(MODEL_INFO.read_text(encoding="utf-8")).get("name", ""))
+                except (ValueError, OSError):
+                    pass
             d = time.strftime("%m%d", time.localtime(MODEL_PATH.stat().st_mtime))
-            MODEL_VER = "-".join(x for x in (self.arch, MODEL_PATH.stem, d) if x)
+            MODEL_VER = info_name or "-".join(x for x in (self.arch, MODEL_PATH.stem, d) if x)
         print(f"모델 로드: {MODEL_PATH.name} ({self.backend}) 버전={MODEL_VER} 클래스={self.names} 입력={IMG_SIZE}",
               flush=True)
         # 첫 추론은 1~2초 걸려서 첫 제품이 TIMEOUT 나지 않게 미리 한 번 돌려 둬요

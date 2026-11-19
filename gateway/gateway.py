@@ -192,7 +192,7 @@ class Gateway:
         parts = msg.topic.split("/")
         if parts[2] == "resp":
             if data.get("rsc") not in (2000, 2001, 2004):
-                log("!! CSE 응답 오류", data.get("rsc"), json.dumps(data.get("pc", ""))[:200])
+                log("!! CSE 응답 오류", data.get("rsc"), "to=" + str(data.get("to", "")), str(data.get("pc", ""))[-600:])
             return
         # 알림 (op 5)
         me = parts[4]

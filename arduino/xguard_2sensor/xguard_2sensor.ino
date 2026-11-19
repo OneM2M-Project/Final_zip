@@ -120,6 +120,10 @@ bool sensorHit(Sensor &s) {
   }
   if (now - s.changedAt >= DEBOUNCE_MS && raw != s.stable) {
     s.stable = raw;
+    // 확인용: 센서 값이 바뀔 때마다 알려줘요 -> logs/gateway.log 에 "아두이노: RAW,S1,L" 로 남아요
+    Serial.print(F("RAW,S"));
+    Serial.print(s.pin == PIN_S1 ? 1 : 2);
+    Serial.println(raw ? F(",H") : F(",L"));
     if (s.stable != s.idle && now - s.lastHitAt >= DET_GAP_MS) {
       s.lastHitAt = now;
       return true;

@@ -1,27 +1,32 @@
-"""X-Guard 게이트웨이: 아두이노(USB 시리얼) <-> oneM2M MN-CSE(MQTT).
+"""X-Guard gateway: Arduino (USB serial) <-> oneM2M MN-CSE (MQTT).
 
-하나의 프로그램이 두 AE 역할을 해요.
-  * LineSensor-01 (CLineSensor01): ① DET,seq,0 수신 -> ② arrivals cin, lineStatus cin
-  * Rejector-01   (CRejector01)  : ⑦ 판정 알림 -> ⑧ OK,seq / NG,seq 전송, ⑨ REJ/PASS -> rejectLog cin
-  * 두 AE 모두 cmd 컨테이너 알림(대시보드 그룹 명령) -> 아두이노에 STOP/START (시험용 T1/T2/SERVO)
+One process plays two AEs:
+  LineSensor-01 (CLineSensor01)  step 1 DET,seq,0 from serial -> step 2 arrivals cin and lineStatus cin
+  Rejector-01   (CRejector01)    step 7 verdict notification -> step 8 send OK,seq / NG,seq,
+                                 step 9 REJ/PASS from serial -> rejectLog cin
+Both AEs also get the dashboard's group commands through their cmd containers and pass
+STOP/START (and the test commands T1/T2/SERVO) on to the Arduino.
 
-아두이노는 하드웨어 팀 코드 arduino/xguard_2sensor (= arduino/src/main.cpp, 2026-11-15) 기준이에요.
-  D2 S1 E18-D80NK 입구 · D3 S2 E18-D80NK 리젝터 앞 · D9 SG90 서보 · D13 LED (비상정지 버튼 없음)
-  S1 감지 -> DET -> 판정(OK/NG) 기록 -> S2 감지 때 대기열 맨 앞 제품을 판정대로 PASS / REJ(배출)
+The Arduino side is the hardware team's arduino/xguard_2sensor sketch (same as
+arduino/src/main.cpp, 2026-11-15): D2 = S1 entry sensor, D3 = S2 sensor in front of the
+rejector, D9 = SG90 servo, D13 = LED, no e-stop button. When S1 sees a product it sends DET
+and remembers the verdict we send back. When S2 fires, the product at the head of the queue
+is passed or pushed off according to that verdict.
 
-시리얼 메시지 (115200bps, 한 줄에 하나)
-  아두이노 -> PC  DET,17,0            17번 제품 S1 감지 (벨트 펄스 센서가 없어서 항상 0)
-                  REJ,17,DONE         17번 NG 라서 배출 (TIMEOUT = S2 에 왔는데 판정이 없어 안전하게 배출)
-                  PASS,17             17번 OK 라서 통과
-                  STATUS,RUNNING|STOPPED
-                  CNT,0               (호환용) CNT 응답
-  PC -> 아두이노  OK,17 / NG,17       판정
-                  STOP / START        정지 / 재시작 (정지 중에는 S1 감지를 무시)
-                  T1 / T2 / SERVO     (시험) S1 감지 흉내 / S2 감지 흉내 / 서보 한 번 밀기
-  (예전 펌웨어의 ARRIVE / AT_REJECTOR 도 읽어요)
+Serial protocol, 115200 baud, one message per line:
+  Arduino -> PC  DET,17,0        product 17 seen at S1 (last field is always 0, no belt encoder)
+                 REJ,17,DONE     product 17 was NG and got pushed off
+                 REJ,17,TIMEOUT  reached S2 with no verdict yet, pushed off to be safe
+                 PASS,17         product 17 was OK and passed
+                 STATUS,RUNNING|STOPPED
+                 CNT,0           reply to CNT, kept for compatibility
+  PC -> Arduino  OK,17 / NG,17   verdict
+                 STOP / START    stop or restart (S1 is ignored while stopped)
+                 T1 / T2 / SERVO tests: fake an S1 hit, fake an S2 hit, push the servo once
+ARRIVE and AT_REJECTOR from the older firmware are still understood.
 
-.env 의 SERIAL_PORT=SIM 이면 아두이노 없이 가짜 아두이노(SimArduino)로 돌아가요.
-실행: python gateway/gateway.py
+With SERIAL_PORT=SIM in .env it runs against a fake Arduino (SimArduino).
+Run: python gateway/gateway.py
 """
 import json
 import os
@@ -52,23 +57,24 @@ _log_lock = threading.Lock()
 
 
 def log(*a):
-    with _log_lock:  # 시리얼/MQTT 스레드가 동시에 찍어도 줄이 섞이지 않게
+    with _log_lock:  # keep serial and MQTT thread output from interleaving
         print(datetime.now().strftime("%H:%M:%S"), *a, flush=True)
 
 
-# ====================================================================== 가짜 아두이노
+# ====================================================================== fake Arduino
 class SimArduino:
-    """arduino/src/main.cpp (하드웨어 팀 2센서 버전)와 같은 규칙으로 동작하는 가짜 아두이노.
+    """Fake Arduino that follows the same rules as arduino/src/main.cpp (two-sensor version).
 
-    SIM_ARRIVE_SEC 마다 S1 감지(DET), SIM_TRAVEL_SEC 뒤 S2 감지 -> 대기열 맨 앞 제품을
-    판정대로 PASS / REJ,DONE, 판정이 없으면 REJ,TIMEOUT. T1/T2/SERVO/CNT/V 명령도 똑같이 받아요.
+    Every SIM_ARRIVE_SEC it fakes an S1 hit (DET). SIM_TRAVEL_SEC later it fakes S2 and
+    handles the head of the queue: PASS or REJ,DONE by verdict, REJ,TIMEOUT if there is none.
+    Accepts the same T1/T2/SERVO/CNT/V commands as the real board.
     """
 
     def __init__(self, arrive_sec, travel_sec):
         self.out = queue.Queue()
         self.arrive_sec, self.travel_sec = arrive_sec, travel_sec
         self.seq, self.running = 0, True
-        self.q = []                   # [seq, verdict] ('?' 아직 없음, 'P' 통과, 'F' 배출)
+        self.q = []                   # [seq, verdict]: '?' none yet, 'P' pass, 'F' reject
         self.lock = threading.Lock()
         self.out.put("STATUS,RUNNING")
         if arrive_sec > 0:
@@ -80,7 +86,7 @@ class SimArduino:
             self.on_s1()
 
     def on_s1(self):
-        if not self.running:          # 정지 중에는 S1 감지 무시 (펌웨어와 같음)
+        if not self.running:          # ignore S1 while stopped, like the firmware
             return
         with self.lock:
             self.seq = self.seq % 65535 + 1
@@ -107,7 +113,7 @@ class SimArduino:
                     it[1] = v
                     return
 
-    # serial.Serial 과 같은 모양의 인터페이스
+    # same interface as serial.Serial
     def readline(self):
         try:
             return (self.out.get(timeout=0.2) + "\n").encode()
@@ -130,11 +136,11 @@ class SimArduino:
             self.on_s2()
         elif line == "CNT":
             self.out.put("CNT,0")
-        # SERVO: 서보만 한 번 밀고 메시지는 없음
+        # SERVO just moves the servo once and sends nothing back
 
 
 def open_serial():
-    """SIM 이면 가짜 아두이노. COM 포트를 못 열면 포트 목록을 보여 주고 3초마다 다시 시도."""
+    """Return the fake Arduino for SIM. If the COM port won't open, list ports and retry every 3 s."""
     if SERIAL_PORT.upper() == "SIM":
         log("SERIAL_PORT=SIM -> 가짜 아두이노로 실행")
         return SimArduino(float(os.getenv("SIM_ARRIVE_SEC", "4")), float(os.getenv("SIM_TRAVEL_SEC", "3")))
@@ -149,12 +155,12 @@ def open_serial():
             log(f"!! {SERIAL_PORT} 를 못 열었어요: {e}")
             log(f"   연결된 포트: {ports}  -> .env 의 SERIAL_PORT 를 고치거나, 시리얼 모니터를 닫으세요. 3초 뒤 다시 시도")
             time.sleep(3)
-    time.sleep(2)  # 우노는 포트를 열면 리셋돼요 (서보 제자리 0.4초 뒤 STATUS,RUNNING)
+    time.sleep(2)  # the Uno resets when the port opens (servo homes, STATUS,RUNNING ~0.4 s later)
     log(f"시리얼 연결: {SERIAL_PORT} @ {SERIAL_BAUD}")
     return s
 
 
-# ====================================================================== 게이트웨이
+# ====================================================================== gateway
 class Gateway:
     def __init__(self):
         self.ser = open_serial()
@@ -170,11 +176,11 @@ class Gateway:
     def on_connect(self, client, userdata, flags, reason_code, properties=None):
         log("MQTT 연결됨", reason_code)
         for orig in (LS, RJ):
-            client.subscribe(f"/oneM2M/resp/{orig}/{CSE_ID}/json")   # 내가 보낸 요청의 응답
-            client.subscribe(f"/oneM2M/req/{CSE_ID}/{orig}/json")    # CSE가 보내는 알림
+            client.subscribe(f"/oneM2M/resp/{orig}/{CSE_ID}/json")   # responses to our requests
+            client.subscribe(f"/oneM2M/req/{CSE_ID}/{orig}/json")    # notifications from the CSE
 
     def send_req(self, orig, to, ty, pc, op=1):
-        """② ⑨: oneM2M 요청을 MQTT로 보낸다."""
+        """Send a oneM2M request over MQTT (steps 2 and 9)."""
         msg = {"op": op, "to": f"{CSE_RN}/{to}", "fr": orig, "rqi": "r-" + uuid.uuid4().hex[:8],
                "rvi": "3", "pc": pc}
         if ty:
@@ -194,7 +200,7 @@ class Gateway:
             if data.get("rsc") not in (2000, 2001, 2004):
                 log("!! CSE 응답 오류", data.get("rsc"), "to=" + str(data.get("to", "")), str(data.get("pc", ""))[-600:])
             return
-        # 알림 (op 5)
+        # notification (op 5)
         me = parts[4]
         client.publish(f"/oneM2M/resp/{CSE_ID}/{me}/json",
                        json.dumps({"rsc": 2000, "rqi": data.get("rqi"), "rvi": "3", "to": data.get("fr"),
@@ -212,9 +218,9 @@ class Gateway:
         elif "verdict" in con:
             self.handle_verdict(con)
 
-    # ---------------------------------------------------------------- 처리
+    # ---------------------------------------------------------------- handlers
     def handle_verdict(self, con):
-        """⑦ -> ⑧: PASS가 아니면 모두 리젝 (ERROR 포함)."""
+        """Steps 7 -> 8. Anything other than PASS is rejected, ERROR included."""
         seq = int(con.get("seq", 0))
         if seq <= 0:
             return
@@ -223,9 +229,10 @@ class Gateway:
         log(f"⑦ 판정 #{seq} {con.get('verdict')} {con.get('defectClass', '')} -> ⑧ {ok},{seq}")
 
     def handle_cmd(self, cmd):
-        if cmd not in ("STOP", "START", "T1", "T2", "SERVO"):   # T1/T2/SERVO 는 대시보드 '하드웨어 시험'
+        if cmd not in ("STOP", "START", "T1", "T2", "SERVO"):   # T1/T2/SERVO come from the dashboard's hardware test page
             return
-        # 그룹 fanout으로 두 cmd 컨테이너에서 같은 명령이 오므로 1초 안 중복은 무시
+        # The group fanout delivers the same command through both cmd containers,
+        # so drop a repeat within 1 s.
         if self.last_cmd[0] == cmd and time.time() - self.last_cmd[1] < 1.0:
             return
         self.last_cmd = (cmd, time.time())
@@ -249,7 +256,7 @@ class Gateway:
         else:
             self.rejected += 1
             self.timeout += reason == "TIMEOUT"
-        self.push_status()   # 대시보드 카운터 (통과/배출/TIMEOUT)
+        self.push_status()   # dashboard counters (passed / rejected / timeout)
         log(f"{raw} -> ⑨ rejectLog #{seq} {action} {reason}")
 
     def handle_serial(self, line):
@@ -263,13 +270,13 @@ class Gateway:
             self.push_status()
             log(f"① {line} -> ② arrivals {con['productId']}")
         elif p[0] == "REJ" and len(p) >= 2 and p[1].isdigit():
-            reason = "OK" if len(p) < 3 or p[2] == "DONE" else p[2]   # DONE = 판정대로 배출
+            reason = "OK" if len(p) < 3 or p[2] == "DONE" else p[2]   # DONE = rejected because of the verdict
             self.reject_log(int(p[1]), "REJECTED", reason, line)
         elif p[0] == "PASS" and len(p) >= 2 and p[1].isdigit():
             self.reject_log(int(p[1]), "PASSED", "OK", line)
-        elif p[0] == "AT_REJECTOR" and len(p) >= 4 and p[1].isdigit():   # 예전 펌웨어
+        elif p[0] == "AT_REJECTOR" and len(p) >= 4 and p[1].isdigit():   # older firmware
             self.reject_log(int(p[1]), p[2], p[3], line)
-        elif p[0] == "CNT":   # 벨트 펄스 센서가 없어서 항상 0 (호환용)
+        elif p[0] == "CNT":   # always 0 since there is no belt encoder; kept for compatibility
             log("아두이노:", line)
         elif p[0] == "STATUS" and len(p) >= 2:
             self.running = p[1] == "RUNNING"

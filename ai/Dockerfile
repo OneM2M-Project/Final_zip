@@ -1,4 +1,4 @@
-# 프로젝트 루트에서 빌드:  docker build -f ai/Dockerfile -t <dockerhub-id>/xguard-ai:1.0 .
+# Build from the project root:  docker build -f ai/Dockerfile -t <dockerhub-id>/xguard-ai:1.0 .
 FROM python:3.11-slim
 
 WORKDIR /app
@@ -12,7 +12,7 @@ COPY common/ common/
 COPY ai/app.py ai/app.py
 COPY models/ models/
 
-# 기본값 (docker run --env-file .env 또는 k8s env 로 덮어쓰기)
+# defaults; override with docker run --env-file .env or k8s env
 ENV CSE_URL=http://host.docker.internal:8080 \
     CSE_RN=cse-mn \
     AI_PORT=9000 \

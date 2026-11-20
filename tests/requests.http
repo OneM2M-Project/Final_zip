@@ -1,21 +1,21 @@
-### VS Code REST Client 로 oneM2M 요청 시험 (요청 위의 "Send Request" 클릭)
+### oneM2M test requests for the VS Code REST Client (click "Send Request" above each one)
 @cse = http://127.0.0.1:8080/cse-mn
 
-### 0) CSEBase 확인
+### 0) Check the CSEBase
 GET {{cse}}
 X-M2M-Origin: CAdmin
 X-M2M-RI: t0
 X-M2M-RVI: 3
 Accept: application/json
 
-### 1) 전체 리소스 목록 (discovery)
+### 1) List all resources (discovery)
 GET {{cse}}?fu=1
 X-M2M-Origin: CAdmin
 X-M2M-RI: t1
 X-M2M-RVI: 3
 Accept: application/json
 
-### 2) ② 도착 기록을 손으로 넣기 (게이트웨이 없이 ③~⑦ 흐름 시작)
+### 2) Add an arrival by hand (step 2), which starts steps 3-7 without the gateway
 POST {{cse}}/LineSensor-01/arrivals
 X-M2M-Origin: CLineSensor01
 X-M2M-RI: t2
@@ -25,14 +25,14 @@ Accept: application/json
 
 {"m2m:cin": {"con": {"seq": 17, "productId": "A-00017", "ts": "20261104T110500"}}}
 
-### 3) ⑥ 최신 판정 결과 (flexContainer)
+### 3) Latest verdict (step 6, flexContainer)
 GET {{cse}}/Inspection/inspectionResult
 X-M2M-Origin: CDashboard
 X-M2M-RI: t3
 X-M2M-RVI: 3
 Accept: application/json
 
-### 4) ⑥ 판정 결과를 손으로 갱신 (AI 없이 ⑦ 리젝터 시험)
+### 4) Set a verdict by hand (step 6) to test the rejector without the AI
 PUT {{cse}}/Inspection/inspectionResult
 X-M2M-Origin: CInspection
 X-M2M-RI: t4
@@ -42,28 +42,28 @@ Accept: application/json
 
 {"xg:inRet": {"seq": 17, "productId": "A-00017", "verdict": "FAIL", "defectClass": "knife", "confidence": 0.91, "inferenceMs": 38, "modelVer": "yolov8n-xguard-1.0"}}
 
-### 5) ⑩ 불량 컨테이너 찾기 (라벨 discovery)
+### 5) Find the defects container by label (step 10)
 GET {{cse}}?fu=1&lbl=type:defect&ty=3
 X-M2M-Origin: CDashboard
 X-M2M-RI: t5
 X-M2M-RVI: 3
 Accept: application/json
 
-### 6) ⑩ 불량 이력
+### 6) Defect history (step 10)
 GET {{cse}}/Inspection/defects?rcn=4
 X-M2M-Origin: CDashboard
 X-M2M-RI: t6
 X-M2M-RVI: 3
 Accept: application/json
 
-### 7) ⑩ 라인 상태
+### 7) Line status (step 10)
 GET {{cse}}/LineSensor-01/lineStatus/la
 X-M2M-Origin: CDashboard
 X-M2M-RI: t7
 X-M2M-RVI: 3
 Accept: application/json
 
-### 8) ⑩ 비상 정지 (그룹 fanout)
+### 8) Stop the line through the group fanout
 POST {{cse}}/lineA-devices/fopt
 X-M2M-Origin: CDashboard
 X-M2M-RI: t8
@@ -73,7 +73,7 @@ Accept: application/json
 
 {"m2m:cin": {"con": {"cmd": "STOP"}}}
 
-### 9) 재시작
+### 9) Restart
 POST {{cse}}/lineA-devices/fopt
 X-M2M-Origin: CDashboard
 X-M2M-RI: t9
@@ -83,7 +83,7 @@ Accept: application/json
 
 {"m2m:cin": {"con": {"cmd": "START"}}}
 
-### 10) 권한 확인: 대시보드가 판정을 바꾸려 하면 4103 이 나와야 정상
+### 10) Permission check: the dashboard trying to change a verdict should get 4103
 PUT {{cse}}/Inspection/inspectionResult
 X-M2M-Origin: CDashboard
 X-M2M-RI: t10

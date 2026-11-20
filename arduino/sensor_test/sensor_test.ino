@@ -1,12 +1,11 @@
 /*
- * 적외선 센서 테스트 (E18-D80NK 2개)
- *   S1 검정 선 -> D2,  S2 검정 선 -> D3,  갈색 -> 5V,  파랑 -> GND
- *   시리얼 모니터 115200 으로 열기
+ * IR sensor test for the two E18-D80NK sensors.
+ *   S1 black -> D2, S2 black -> D3, brown -> 5V, blue -> GND
+ *   Open the serial monitor at 115200.
  *
- * 값이 바뀔 때마다 한 줄 출력 + 1초마다 현재 상태 출력
- *   예) S1=H S2=L
- *   센서 앞에 손을 넣었다 뺐을 때 H <-> L 이 바뀌면 센서가 동작하는 거예요.
- *   손을 넣어도 안 바뀌면 그 센서는 배선/전원/감도 문제예요.
+ * Prints a line whenever a value changes, plus the current state every second,
+ * e.g. S1=H S2=L. Wave a hand in front of a sensor: if it flips between H and L the
+ * sensor works. If it doesn't change, check that sensor's wiring, power or sensitivity.
  */
 const int PIN_S1 = 2;
 const int PIN_S2 = 3;
@@ -46,7 +45,7 @@ void loop() {
     printState("[S2 바뀜]");
   }
 
-  // 보드 L LED: S1 이 LOW 면 켜짐 (시리얼 없이도 눈으로 확인)
+  // onboard LED is on while S1 reads LOW, so you can check it without the serial monitor
   digitalWrite(LED_BUILTIN, v1 == LOW ? HIGH : LOW);
 
   if (millis() - lastPrint >= 1000) {

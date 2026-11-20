@@ -1,6 +1,7 @@
-"""oneM2M HTTP 공통 헬퍼 (명세서 '공통 규칙' 그대로).
+"""Shared oneM2M HTTP helpers.
 
-모든 Python AE가 이 파일을 import 해서 같은 헤더/주소 규칙을 씁니다.
+Every Python AE imports this so they all use the same headers and addressing,
+as described under "common rules" in the spec.
 """
 import json
 import os
@@ -13,10 +14,10 @@ ROOT = Path(__file__).resolve().parent.parent
 
 
 def load_env():
-    """프로젝트 루트의 .env를 읽어 os.environ에 넣는다(이미 있는 값은 유지)."""
+    """Load the project's .env into os.environ. Values already set are kept."""
     env = ROOT / ".env"
     if not env.exists():
-        env = ROOT / "env.example"  # .env 를 아직 안 만들었으면 예시 설정으로 실행
+        env = ROOT / "env.example"  # no .env yet, so run with the example settings
     if not env.exists():
         return
     for line in env.read_text(encoding="utf-8").splitlines():
@@ -48,7 +49,7 @@ def headers(origin, ty=None):
 
 
 def url(path):
-    """'LineSensor-01/arrivals' 또는 'cse-mn/...' 모두 허용."""
+    """Accepts both 'LineSensor-01/arrivals' and 'cse-mn/...'."""
     path = path.strip("/")
     if not path.startswith(CSE_RN):
         path = f"{CSE_RN}/{path}" if path else CSE_RN
@@ -84,9 +85,9 @@ def add_cin(path, origin, con):
 
 
 def parse_notification(body):
-    """m2m:sgn에서 (rep 딕셔너리, sur, vrq여부)를 꺼낸다.
+    """Pull (rep, sur, is_verification) out of an m2m:sgn body.
 
-    rep 예: {"m2m:cin": {...}} 또는 {"xg:inRet": {...}}
+    rep looks like {"m2m:cin": {...}} or {"xg:inRet": {...}}.
     """
     sgn = (body or {}).get("m2m:sgn", {})
     if sgn.get("vrq"):
@@ -96,7 +97,7 @@ def parse_notification(body):
 
 
 def content_of(rep):
-    """rep에서 실제 값(dict)을 꺼낸다. cin이면 con, flexContainer(xg:inRet)면 속성들."""
+    """Get the payload dict from rep: con for a cin, the attributes for an xg:inRet flexContainer."""
     if not rep:
         return None
     if "m2m:cin" in rep:
@@ -114,5 +115,5 @@ def content_of(rep):
 
 
 def notify_ok():
-    """구독 알림에 대한 정상 응답 (HTTP 200 + X-M2M-RSC: 2000)."""
+    """OK reply to a notification (HTTP 200 with X-M2M-RSC: 2000)."""
     return "", 200, {"X-M2M-RSC": "2000"}

@@ -1,5 +1,5 @@
-// X-Guard 판정 결과 flexContainer 특수화 (명세서 'AI 모델 출력 규칙 5')
-// ACME는 base directory의 init/ 폴더에 있는 *.fcp 를 시작할 때 자동으로 읽어요.
+// flexContainer specialization for the X-Guard inspection result (spec, AI output rule 5)
+// ACME loads every *.fcp in its base directory's init/ folder on startup.
 [
     {
         "type"  : "xg:inRet",

@@ -1,6 +1,6 @@
-# 모델 학습용 (train/train.py). torch 는 먼저 따로 설치:
+# For training (train/train.py). Install torch first:
 #   NVIDIA GPU: pip install torch torchvision --index-url https://download.pytorch.org/whl/cu128
-#   CPU만:      pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
+#   CPU only:   pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
 ultralytics>=8.3
 albumentations>=2.0
 pyyaml

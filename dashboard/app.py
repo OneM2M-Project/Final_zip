@@ -1,14 +1,16 @@
-"""X-Guard 대시보드 (Dashboard, CDashboard).
+"""X-Guard dashboard (Dashboard, origin CDashboard).
 
-⑩ defects 구독 알림을 9100/notify 로 받아 실시간 경보를 띄우고,
-   discovery(lbl=type:defect)로 불량 이력, lineStatus/la 로 라인 상태·카운터,
-   inspectionResult + xrayImages 로 최근 검사 사진, rejectLog 로 배출/통과 이벤트를 보여줘요.
-   정지/재시작과 하드웨어 시험(T1/T2/SERVO)은 lineA-devices 그룹의 fopt 로 보내요.
+Takes defects notifications on :9100/notify (step 10) and shows them as live alerts.
+The rest of the page is read from the CSE: defect history through discovery
+(lbl=type:defect), line state and counters from lineStatus/la, the latest inspection
+photo from inspectionResult + xrayImages, and pass/reject events from rejectLog.
+Stop/start and the hardware tests (T1/T2/SERVO) go out through the lineA-devices group's fopt.
 
-하드웨어 (하드웨어 팀 2026-11-15): S1 E18-D80NK(D2) 입구, S2 E18-D80NK(D3) 리젝터 앞, SG90 서보(D9),
-   비상정지 버튼 없음 -> 정지는 이 화면의 '정지' 버튼(STOP 명령)으로.
+Hardware (per the hardware team, 2026-11-15): S1 E18-D80NK on D2 at the entry, S2 E18-D80NK
+on D3 in front of the rejector, SG90 servo on D9. There is no e-stop button, so the Stop
+button on this page (STOP command) is how you halt the line.
 
-실행: streamlit run dashboard/app.py   (화면 http://localhost:8501)
+Run: streamlit run dashboard/app.py   (then open http://localhost:8501)
 """
 import base64
 import html
@@ -33,11 +35,11 @@ ORIG = "CDashboard"
 NOTIFY_PORT = int(os.getenv("DASH_NOTIFY_PORT", "9100"))
 RESULT_MODE = os.getenv("RESULT_MODE", "flex")
 REFRESH_SEC = 2
-# streamlit 1.50+ 는 width="stretch", 그 전 버전은 use_container_width=True
+# streamlit 1.50+ wants width="stretch"; older versions use use_container_width=True
 FULL = ({"width": "stretch"} if tuple(int(x) for x in st.__version__.split(".")[:2]) >= (1, 50)
         else {"use_container_width": True})
 
-HARDWARE = [  # arduino/src/main.cpp 맨 위 배선 그대로
+HARDWARE = [  # same wiring as the top of arduino/src/main.cpp
     ("S1 입구 센서", "E18-D80NK #1", "D2", "감지 시 LOW · 제품 진입 → DET"),
     ("S2 리젝터 앞 센서", "E18-D80NK #2", "D3", "감지 시 LOW · 대기열 맨 앞 처리"),
     ("리젝터", "SG90 서보", "D9", "밀 때만 신호, 복귀 후 detach"),
@@ -47,14 +49,14 @@ HARDWARE = [  # arduino/src/main.cpp 맨 위 배선 그대로
 ]
 
 
-# ---------------------------------------------------------------- 알림 수신기 (한 번만 시작)
+# ---------------------------------------------------------------- notification receiver (started once)
 @st.cache_resource
 def notify_server():
     alerts = deque(maxlen=50)
     srv = Flask("dash-notify")
 
     @srv.post("/notify")
-    @srv.post("/notify/<path:_rest>")  # ACME는 nu 경로를 poa 뒤에 붙여 보낼 수 있어요
+    @srv.post("/notify/<path:_rest>")  # ACME may append the nu path to the poa
     def notify(_rest=None):
         rep, _, vrq = m2m.parse_notification(request.get_json(silent=True))
         if not vrq:
@@ -70,11 +72,11 @@ def notify_server():
 
 @st.cache_resource
 def image_cache():
-    """seq -> (ct, PIL 이미지). 2초마다 같은 사진을 다시 받지 않게."""
+    """seq -> (time, PIL image), so the same photo isn't fetched again on every 2 s refresh."""
     return OrderedDict()
 
 
-# ---------------------------------------------------------------- oneM2M 조회
+# ---------------------------------------------------------------- oneM2M reads
 def get_json(path, **params):
     try:
         r = m2m.retrieve(path, ORIG, **params)
@@ -84,12 +86,12 @@ def get_json(path, **params):
 
 
 def since(minutes):
-    """필터 cra(이 시각 뒤에 만든 것) 값. CSE 시각은 UTC."""
+    """Value for the cra filter (created after). CSE times are UTC."""
     return (datetime.now(timezone.utc) - timedelta(minutes=minutes)).strftime("%Y%m%dT%H%M%S")
 
 
 def cins(path, minutes=None):
-    """컨테이너의 cin 들을 (con, ct) 로, 최신 것부터."""
+    """A container's cins as (con, ct), newest first."""
     params = {"rcn": 4, "ty": 4}
     if minutes:
         params["cra"] = since(minutes)
@@ -118,7 +120,7 @@ def last_result():
 
 
 def defect_history(limit=30):
-    """discovery로 type:defect 라벨 컨테이너를 찾고, 그 안의 cin 목록을 최신순으로."""
+    """Find containers labeled type:defect through discovery and list their cins, newest first."""
     uris = (get_json("", fu=1, lbl="type:defect", ty=3) or {}).get("m2m:uril", [])
     rows = []
     for u in uris:
@@ -127,7 +129,7 @@ def defect_history(limit=30):
 
 
 def image_of(seq):
-    """seq 번 제품의 X-ray 사진 (같은 seq 가 여러 번이면 가장 최근 것)."""
+    """Photo for product seq. If the seq shows up more than once, the newest one wins."""
     cache = image_cache()
     if seq in cache:
         return cache[seq][1]
@@ -169,7 +171,7 @@ def esc(v):
 
 
 def ct_time(ct):
-    """'20261116T081300,123' (UTC) -> '17:13:00' (이 PC 시각)."""
+    """'20261116T081300,123' (UTC) -> '17:13:00' in this PC's local time."""
     try:
         t = datetime.strptime(ct[:15], "%Y%m%dT%H%M%S").replace(tzinfo=timezone.utc)
         return t.astimezone().strftime("%H:%M:%S")
@@ -177,7 +179,7 @@ def ct_time(ct):
         return ""
 
 
-# ---------------------------------------------------------------- 스타일
+# ---------------------------------------------------------------- styles
 CSS = """
 <style>
 @import url('https://cdn.jsdelivr.net/gh/orioncactus/pretendard@v1.3.9/dist/web/static/pretendard.min.css');
@@ -255,7 +257,7 @@ def kpi(label, value, hint="", cls="", unit=""):
             f'<div class="v">{esc(value)}<small>{esc(unit)}</small></div><div class="h">{esc(hint)}</div></div>')
 
 
-# ---------------------------------------------------------------- 화면
+# ---------------------------------------------------------------- page
 st.set_page_config(page_title="X-Guard", page_icon="🛡️", layout="wide")
 st.markdown(CSS, unsafe_allow_html=True)
 alerts = notify_server()

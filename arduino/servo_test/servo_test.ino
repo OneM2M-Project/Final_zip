@@ -1,22 +1,22 @@
 /*
- * 서보(MG996R) 테스트 - 전력 적게 쓰는 버전
- *   주황(신호) -> D9,  빨강 -> 외부 5~6V(2A 이상) +,  갈색 -> 외부 전원 - 와 아두이노 GND
- *   시리얼 모니터 115200, 줄 끝 "새 줄(Newline)"
+ * Servo (MG996R) test, low-power version.
+ *   orange (signal) -> D9, red -> external 5-6 V (2 A or more), brown -> external ground and Arduino GND
+ *   Serial monitor at 115200 with line ending set to Newline.
  *
- * 전력 줄이는 방법
- *   - 한 번에 확 돌지 않고 2도씩 천천히 움직여요 (순간 전류가 작아져요)
- *   - 움직일 때만 신호를 주고, 도착하면 신호를 끊어요(detach) -> 대기 중 전류 거의 0
- *   - 펄스 폭을 500~2400us 로 넓혀서 싸구려 SG90 도 끝까지 가게 해요
+ * To keep current down it moves 2 degrees at a time instead of jumping, only drives
+ * the servo while moving and detaches once it arrives (almost no idle current), and
+ * uses a wide 500-2500 us pulse range so cheap SG90s also reach the full travel.
  *
- * 켜면 3초마다 10도 <-> 100도 자동 왕복.  숫자(0~180)를 보내면 그 각도로, "auto" 면 다시 자동.
+ * On power-up it swings between 10 and 100 degrees every 3 s. Send a number (0-180)
+ * to go to that angle, or "auto" to go back to swinging.
  */
 #include <Servo.h>
 
 const int PIN_SERVO = 9;
 const int REST = 10;
 const int PUSH = 100;
-const int STEP_DEG = 2;      // 한 번에 움직이는 각도 (작을수록 전류 작고 느림)
-const int STEP_MS = 15;      // 한 걸음 사이 시간
+const int STEP_DEG = 2;      // degrees per step (smaller = less current, slower)
+const int STEP_MS = 15;      // time between steps
 const int MIN_US = 500, MAX_US = 2500;  // MG996R
 
 Servo sv;
@@ -42,8 +42,8 @@ void moveSlow(int target) {
     sv.write(cur);
     delay(STEP_MS);
   }
-  delay(300);      // 도착할 시간
-  sv.detach();     // 신호 끊기 -> 전류 줄이기
+  delay(300);      // let it arrive
+  sv.detach();     // detach to cut current
 }
 
 void setup() {

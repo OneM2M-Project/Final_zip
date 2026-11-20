@@ -1,8 +1,8 @@
 # models/
 
-Colab 노트북(`train/colab_train.ipynb`)이 Drive 의 `ROOT/model/` 에 만든 파일을 여기에 복사해요 (또는 GPU PC 에서 `train/train.py`).
+Copy the files the Colab notebook (`train/colab_train.ipynb`) writes to `ROOT/model/` on Drive into this folder. `train/train.py` on a GPU PC writes them here directly.
 
-- `detect.pt`       : YOLOv8n TorchScript (출력 `[1, 4+클래스수, 8400]`, README "detect.pt 규격" 형식 B). ai/app.py 기본값으로 읽혀요.
-- `best.pt`         : 같은 모델의 ultralytics 체크포인트 (`MODEL_BACKEND=ultralytics` 로 쓸 때).
-- `classes.txt`     : 클래스 번호 순서대로 한 줄에 하나 (0번 = 첫 줄). 이 이름이 `defectClass`가 돼요. 학습 데이터의 classes.txt 로 덮어써요.
-- `model_info.json` : 언제·몇 장으로 학습했는지, 입력 크기(imgsz), mAP. ai/app.py 가 imgsz 를 여기서 읽어요.
+- `detect.pt`: YOLOv8n as TorchScript, output `[1, 4+num_classes, 8400]` (format B in the README). `ai/app.py` loads this by default.
+- `best.pt`: the same model as an ultralytics checkpoint, for `MODEL_BACKEND=ultralytics`.
+- `classes.txt`: class names in index order, one per line (first line is class 0). These become `defectClass`. Overwrite it with the training data's classes.txt.
+- `model_info.json`: when and on how many images the model was trained, the input size (imgsz) and mAP. `ai/app.py` reads imgsz from here.

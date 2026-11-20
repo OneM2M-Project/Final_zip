@@ -1,15 +1,16 @@
-"""X-Guard oneM2M 리소스 생성기.
+"""Creates the X-Guard oneM2M resources on the MN-CSE.
 
-사용법 (프로젝트 루트에서):
-    python setup/setup_resources.py base    # AE, 컨테이너, flexContainer(라벨), 그룹, ACP
-    python setup/setup_resources.py subs    # 구독 (받는 프로그램들이 먼저 켜져 있어야 해요)
-    python setup/setup_resources.py acp     # ACP만 다시 적용 (권한을 바꿨을 때)
+Run from the project root:
+    python setup/setup_resources.py base    # AEs, containers, flexContainer, group, ACPs
+    python setup/setup_resources.py subs    # subscriptions (the receiving programs must be running)
+    python setup/setup_resources.py acp     # re-apply ACPs only, after changing permissions
     python setup/setup_resources.py all     # base + subs
-    python setup/setup_resources.py show    # 만들어진 리소스 목록 보기
-    python setup/setup_resources.py clean   # 전부 지우기
+    python setup/setup_resources.py show    # list what exists
+    python setup/setup_resources.py clean   # delete everything
 
-ACME는 enableACPChecks=true가 기본이라, 다른 AE의 컨테이너를 구독하려면 ACP가 먼저 있어야 해요.
-그래서 base 단계에서 ACP까지 같이 만들고, acp 명령은 권한을 다시 덮어쓸 때만 써요.
+ACME has enableACPChecks=true by default, so an AE can't subscribe to another AE's
+container until the ACPs exist. That's why base creates the ACPs too. The acp command
+is only for overwriting permissions later.
 """
 import os
 import sys
@@ -23,7 +24,7 @@ PC_IP = os.getenv("PC_IP", "127.0.0.1")
 MQTT_POA = f"mqtt://{os.getenv('MQTT_HOST', '127.0.0.1')}:{os.getenv('MQTT_PORT', '1883')}"
 RESULT_MODE = os.getenv("RESULT_MODE", "flex")
 
-# ---------------------------------------------------------------- AE 정의
+# ---------------------------------------------------------------- AEs
 AES = {
     "LineSensor-01":  {"orig": "CLineSensor01",  "api": "Nxguard.linesensor", "poa": [MQTT_POA]},
     "Rejector-01":    {"orig": "CRejector01",    "api": "Nxguard.rejector",   "poa": [MQTT_POA]},
@@ -35,7 +36,7 @@ AES = {
                        "poa": [f"http://{PC_IP}:{os.getenv('DASH_NOTIFY_PORT', '9100')}/notify"]},
 }
 
-# (AE, 컨테이너 이름, 추가 속성)
+# (AE, container name, extra attributes)
 CONTAINERS = [
     ("LineSensor-01", "arrivals",   {"mni": 500, "lbl": ["line:A", "type:arrival"]}),
     ("LineSensor-01", "lineStatus", {"mni": 50,  "lbl": ["line:A", "type:status"]}),
@@ -49,8 +50,8 @@ CONTAINERS = [
 GROUP = "lineA-devices"
 GROUP_MEMBERS = [f"{m2m.CSE_RN}/LineSensor-01/cmd", f"{m2m.CSE_RN}/Rejector-01/cmd"]
 
-# 구독: (대상 경로, 구독 이름, 알림 받을 AE, 이벤트 타입, 만드는 originator)
-#  net 1=리소스 수정, 3=자식 생성
+# Subscriptions: (target path, sub name, AE that gets notified, event types, creating originator)
+# net 1 = resource updated, 3 = child created
 def subscriptions():
     res_net = [1] if RESULT_MODE == "flex" else [3]
     return [
@@ -63,11 +64,11 @@ def subscriptions():
     ]
 
 
-# ACP 권한 비트: C=1 R=2 U=4 D=8 N=16 Disc=32  (63=전부)
+# ACP operation bits: C=1 R=2 U=4 D=8 N=16 Disc=32 (63 = all)
 C, R, U, D, N, DISC = 1, 2, 4, 8, 16, 32
 READ = R | N | DISC
 ACPS = {
-    # ACP 이름: (적용할 리소스들, [(originator 목록, 권한)])
+    # ACP name: (resources it applies to, [(originators, operations)])
     "acp-linesensor": (["LineSensor-01"], [
         (["CLineSensor01"], 63), (["CImageSource01", "CDashboard"], READ | C)]),
     "acp-rejector": (["Rejector-01"], [
@@ -77,7 +78,7 @@ ACPS = {
     "acp-inspection": (["Inspection"], [
         (["CInspection"], 63), (["CRejector01", "CDashboard"], READ | C)]),
     "acp-dashboard": (["Dashboard"], [(["CDashboard"], 63)]),
-    # 비상 정지 명령: 대시보드가 그룹을 통해 두 cmd 컨테이너에 cin을 쓸 수 있어야 해요
+    # stop/start commands: the dashboard writes to both cmd containers through the group
     "acp-cmd": (["LineSensor-01/cmd", "Rejector-01/cmd"], [
         (["CLineSensor01", "CRejector01"], 63), (["CDashboard"], C | R)]),
     "acp-group": ([GROUP], [(["CDashboard"], C | R | DISC)]),
@@ -96,19 +97,19 @@ def show(tag, resp):
 
 
 def owner_of(path):
-    """경로의 첫 AE 이름으로 originator를 찾는다. 그룹·ACP 등은 CAdmin."""
+    """Originator for a path, based on its first segment. Groups, ACPs and the rest use CAdmin."""
     ae = path.split("/")[0]
     return AES[ae]["orig"] if ae in AES else ADMIN
 
 
-# ---------------------------------------------------------------- 단계
+# ---------------------------------------------------------------- steps
 def base():
     print("== AE 등록")
     for rn, a in AES.items():
         body = {"m2m:ae": {"rn": rn, "api": a["api"], "rr": True, "srv": ["3"], "poa": a["poa"],
                            "lbl": ["line:A"]}}
         code = show(rn, m2m.create("", a["orig"], m2m.TY["ae"], body))
-        if code in (4105, 4117):  # 이미 있으면 poa만 최신으로 (ACME는 같은 originator 재등록에 4117)
+        if code in (4105, 4117):  # already there, just refresh poa (ACME returns 4117 when the same originator registers again)
             show(f"{rn} poa 갱신", m2m.update(rn, a["orig"], {"m2m:ae": {"poa": a["poa"]}}))
 
     print("== 컨테이너")
@@ -173,8 +174,11 @@ def res_key(path):
 
 
 def expand(targets):
-    """ACME는 acpi가 없는 컨테이너를 부모 AE의 ACP로 보지 않아서, AE의 컨테이너에도 같은 ACP를 붙여요.
-    (cmd 컨테이너는 acp-cmd 를 따로 써요)"""
+    """Add the AE's containers to the target list.
+
+    ACME doesn't fall back to the parent AE's ACP for a container with no acpi, so each
+    container gets the same ACP as its AE. The cmd containers are skipped; they use acp-cmd.
+    """
     out = []
     for t in targets:
         out.append(t)
@@ -186,10 +190,10 @@ def expand(targets):
 
 
 def subs(only=None):
-    """only='http' -> HTTP로 받는 AE(이미지·AI·대시보드)만, 'mqtt' -> 게이트웨이(MQTT)만, None -> 전부."""
+    """only='http': just the HTTP AEs (image, AI, dashboard). 'mqtt': just the gateway. None: all."""
     print("== 구독 (알림 받을 프로그램이 켜져 있어야 2001이 나와요)" + (f" [{only}]" if only else ""))
-    # nu 는 AE-ID(예: CRejector01)로 둬요. 그래야 ACME가 AE의 poa로 바로 보내고,
-    # MQTT 토픽도 명세서처럼 /oneM2M/req/id-mn/CRejector01/json 이 돼요.
+    # nu is the AE-ID (e.g. CRejector01). ACME then sends straight to the AE's poa, and
+    # the MQTT topic comes out as /oneM2M/req/id-mn/CRejector01/json like the spec says.
     for target, rn, ae, net, orig in subscriptions():
         if only and not AES[ae]["poa"][0].startswith(only):
             continue
@@ -200,7 +204,7 @@ def subs(only=None):
 
 
 def show_all():
-    r = m2m.retrieve("", ADMIN, fu=1)  # discovery 는 rcn 을 붙이면 ACME 가 거절해요
+    r = m2m.retrieve("", ADMIN, fu=1)  # ACME rejects discovery if rcn is added
     for uri in r.json().get("m2m:uril", []):
         print(" ", uri)
 

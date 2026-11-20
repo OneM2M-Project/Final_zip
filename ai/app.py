@@ -1,15 +1,16 @@
-"""X-Guard AI AE (Inspection, CInspection).
+"""X-Guard AI AE (Inspection, origin CInspection).
 
-⑤ xrayImages 구독 알림(sub-ai)으로 이미지를 받아 models/detect.pt (PyTorch)로 추론하고
-⑥ inspectionResult(flexContainer xg:inRet)를 갱신, FAIL이면 defects에 cin을 하나 더 써요.
+Gets each image through the xrayImages subscription (sub-ai, step 5), runs
+models/detect.pt on it, and writes the verdict to inspectionResult (step 6).
+On FAIL it also adds a cin to defects.
 
-모델 백엔드 (.env 의 MODEL_BACKEND)
-  torchscript  (기본) torch.jit.load(detect.pt). 입출력 규칙은 README 'detect.pt 규격' 참고
-  ultralytics  ultralytics YOLO(detect.pt) 체크포인트를 그대로 사용
-  dummy        모델 없이 흐름 시험: 파일 이름에 클래스 이름이 있으면 FAIL
+MODEL_BACKEND in .env picks how the model is loaded:
+  torchscript  default, torch.jit.load(detect.pt). See "detect.pt format" in the README.
+  ultralytics  load the file as an ultralytics YOLO checkpoint
+  dummy        no model; FAIL if the file name contains a class name
 
-실행 (PC):    python ai/app.py
-실행 (도커):  docker build -f ai/Dockerfile -t xguard-ai .  &&  docker run -p 9000:9000 --env-file .env xguard-ai
+Run on the PC:  python ai/app.py
+Run in Docker:  docker build -f ai/Dockerfile -t xguard-ai .  &&  docker run -p 9000:9000 --env-file .env xguard-ai
 """
 import base64
 import io
@@ -34,7 +35,7 @@ MODEL_PATH = ROOT / os.getenv("MODEL_PATH", "models/detect.pt")
 CLASSES_PATH = ROOT / os.getenv("CLASSES_PATH", "models/classes.txt")
 BACKEND = os.getenv("MODEL_BACKEND", "torchscript").lower()
 IMG_SIZE = int(os.getenv("IMG_SIZE", "640"))
-MODEL_INFO = MODEL_PATH.parent / "model_info.json"  # train/train.py 가 써요 (학습 imgsz 등)
+MODEL_INFO = MODEL_PATH.parent / "model_info.json"  # written by training (imgsz and so on)
 if MODEL_INFO.exists():
     try:
         IMG_SIZE = int(json.loads(MODEL_INFO.read_text(encoding="utf-8")).get("imgsz", IMG_SIZE))
@@ -44,7 +45,8 @@ CONF_TH = float(os.getenv("CONF_TH", "0.5"))
 IOU_TH = float(os.getenv("IOU_TH", "0.45"))
 MODEL_VER = os.getenv("MODEL_VER", "detect-xguard-1.0")
 RESULT_MODE = os.getenv("RESULT_MODE", "flex")
-# 학습 때 mean/std 정규화를 했다면 .env 에 NORM_MEAN=0.485,0.456,0.406 NORM_STD=0.229,0.224,0.225
+# Only set these if the model was trained with mean/std normalization,
+# e.g. NORM_MEAN=0.485,0.456,0.406 NORM_STD=0.229,0.224,0.225
 NORM_MEAN = os.getenv("NORM_MEAN", "")
 NORM_STD = os.getenv("NORM_STD", "")
 
@@ -53,12 +55,15 @@ def load_classes():
     if CLASSES_PATH.exists():
         names = [l.strip() for l in CLASSES_PATH.read_text(encoding="utf-8").splitlines() if l.strip()]
         return dict(enumerate(names))
-    return {0: "stone", 1: "metal", 2: "plastic"}   # 우리 데이터셋 클래스 (obj.names 순서)
+    return {0: "stone", 1: "metal", 2: "plastic"}   # our dataset classes, same order as obj.names
 
 
-# ====================================================================== 전처리 / 후처리
+# ====================================================================== pre/post-processing
 def letterbox(img, size):
-    """비율을 유지해 size x size 로 맞추고 남는 곳은 회색(114)으로 채움. (scale, padx, pady) 반환."""
+    """Resize to size x size keeping the aspect ratio and pad with gray (114).
+
+    Returns (canvas, scale, pad_x, pad_y).
+    """
     w, h = img.size
     s = min(size / w, size / h)
     nw, nh = round(w * s), round(h * s)
@@ -106,12 +111,12 @@ def nms(boxes, scores, iou_th):
 
 
 def decode_output(out):
-    """모델 출력 -> Tensor[N,6] (x1,y1,x2,y2,conf,cls), 입력(640) 좌표계.
+    """Turn raw model output into Tensor[N, 6] (x1, y1, x2, y2, conf, cls) in input (640) pixels.
 
-    받아들이는 형식
-      A) [N,6] 또는 [1,N,6]           : NMS까지 끝난 박스 (권장)
-      B) [1, 4+클래스수, 8400]         : YOLOv8 원본(head) 출력 (cx,cy,w,h + 클래스 점수) -> 여기서 NMS
-      튜플/리스트면 첫 번째 원소를 사용
+    Accepted shapes:
+      A) [N, 6] or [1, N, 6]        boxes with NMS already applied (preferred)
+      B) [1, 4 + num_classes, 8400] raw YOLOv8 head (cx, cy, w, h + class scores); NMS is done here
+    If the model returns a tuple or list, the first element is used.
     """
     import torch
     if isinstance(out, (list, tuple)):
@@ -123,9 +128,9 @@ def decode_output(out):
         out = out[0]
     if out.dim() == 2 and out.shape[-1] == 6:
         return out
-    if out.dim() == 3:  # 형식 B
+    if out.dim() == 3:  # shape B
         p = out[0]
-        if p.shape[0] > p.shape[1]:  # [8400, 4+nc] 로 나온 경우
+        if p.shape[0] > p.shape[1]:  # came out as [8400, 4+nc]
             p = p.T
         xywh, cls_scores = p[:4].T, p[4:].T
         conf, cls = cls_scores.max(1)
@@ -134,14 +139,14 @@ def decode_output(out):
         if not len(conf):
             return torch.zeros((0, 6))
         xyxy = torch.cat([xywh[:, :2] - xywh[:, 2:] / 2, xywh[:, :2] + xywh[:, 2:] / 2], 1)
-        keep = nms(xyxy + cls[:, None] * 4096, conf, IOU_TH)[:100]  # 클래스별 NMS
+        keep = nms(xyxy + cls[:, None] * 4096, conf, IOU_TH)[:100]  # offset by class so NMS runs per class
         return torch.cat([xyxy[keep], conf[keep, None], cls[keep, None].float()], 1)
     raise ValueError(f"알 수 없는 모델 출력 모양: {tuple(out.shape)}")
 
 
-# ====================================================================== 모델
+# ====================================================================== model
 def is_torchscript(path):
-    """torch.jit.save 로 만든 파일이면 True (ultralytics best.pt 는 False)."""
+    """True if the file was saved with torch.jit.save (an ultralytics best.pt is not)."""
     import zipfile
     try:
         with zipfile.ZipFile(path) as z:
@@ -163,8 +168,8 @@ class Detector:
             return
         if not MODEL_PATH.exists():
             raise FileNotFoundError(f"모델 파일이 없어요: {MODEL_PATH}")
-        # .env 의 MODEL_BACKEND 보다 실제 파일 종류를 따라요.
-        # (detect.pt = TorchScript, best.pt = ultralytics 체크포인트. 잘못 고르면 AI가 켜지다 죽어요)
+        # Trust the actual file type over MODEL_BACKEND. detect.pt is TorchScript and
+        # best.pt is an ultralytics checkpoint; loading one as the other crashes on startup.
         ts = is_torchscript(MODEL_PATH)
         if ts and self.backend == "ultralytics":
             print(f"{MODEL_PATH.name} 은 TorchScript 라서 MODEL_BACKEND=ultralytics 대신 torchscript 로 읽어요", flush=True)
@@ -177,7 +182,7 @@ class Detector:
             torch.set_grad_enabled(False)
             try:
                 self.model = torch.jit.load(str(MODEL_PATH), map_location="cpu").eval()
-            except Exception as e:  # TorchScript 가 아니면 (train.py 가 best.pt 를 둔 경우) ultralytics 로
+            except Exception as e:  # not TorchScript after all (train.py left a best.pt), fall back
                 print(f"TorchScript 로 못 읽어서 ultralytics 로 읽어요: {e!r}"[:200])
                 self.backend = "ultralytics"
         if self.backend == "ultralytics":
@@ -194,8 +199,9 @@ class Detector:
                 base = ""
             self.arch = base
         if MODEL_VER.strip().lower() in ("", "auto"):
-            # .env 의 MODEL_VER=auto 면 실제로 읽은 파일에서 이름을 만들어요
-            #   model_info.json 에 name 이 있으면 그 이름 (예: yolov8n_400_single_b16), 없으면 yolov8m-detect-1116 처럼
+            # MODEL_VER=auto: build the name from the loaded model. Use "name" from
+            # model_info.json if there is one (e.g. yolov8n_400_single_b16), otherwise
+            # something like yolov8m-detect-1116.
             info_name = ""
             if MODEL_INFO.exists():
                 try:
@@ -206,13 +212,13 @@ class Detector:
             MODEL_VER = info_name or "-".join(x for x in (self.arch, MODEL_PATH.stem, d) if x)
         print(f"모델 로드: {MODEL_PATH.name} ({self.backend}) 버전={MODEL_VER} 클래스={self.names} 입력={IMG_SIZE}",
               flush=True)
-        # 첫 추론은 1~2초 걸려서 첫 제품이 TIMEOUT 나지 않게 미리 한 번 돌려 둬요
+        # The first inference takes 1-2 s. Run one now so the first product doesn't time out.
         t0 = time.perf_counter()
         self(Image.new("RGB", (IMG_SIZE, IMG_SIZE * 5 // 8), (114, 114, 114)))
         print(f"예열 추론 {(time.perf_counter() - t0) * 1000:.0f}ms", flush=True)
 
     def __call__(self, img, filename=""):
-        """img(PIL RGB) -> [[x1,y1,x2,y2,conf,"class"], ...] (원본 이미지 픽셀 좌표)"""
+        """img (PIL RGB) -> [[x1, y1, x2, y2, conf, "class"], ...] in original image pixels."""
         if BACKEND == "dummy":
             for i, n in self.names.items():
                 if n.lower() in filename.lower():
@@ -229,14 +235,14 @@ class Detector:
         boxes = []
         w, h = img.size
         for x1, y1, x2, y2, conf, cls in det.tolist():
-            # 입력(640) 좌표 -> 원본 좌표 (letterbox 되돌리기)
+            # undo the letterbox: input (640) coords -> original coords
             x1, x2 = [min(max((v - px) / s, 0), w) for v in (x1, x2)]
             y1, y2 = [min(max((v - py) / s, 0), h) for v in (y1, y2)]
             boxes.append([x1, y1, x2, y2, conf, self.names.get(int(cls), str(int(cls)))])
         return boxes
 
 
-# ====================================================================== 판정값 (명세서 규칙 그대로)
+# ====================================================================== verdict (rules from the spec)
 def to_result(con, raw_boxes, ms):
     boxes = [[*[round(float(v), 1) for v in b[:4]], round(float(b[4]), 3), b[5]] for b in raw_boxes]
     top = max(boxes, key=lambda b: b[4], default=None)
@@ -257,7 +263,7 @@ def error_result(con):
 
 
 def publish(result, boxes):
-    """⑥ inspectionResult 갱신 + FAIL이면 defects cin."""
+    """Step 6: update inspectionResult, and add a defects cin on FAIL."""
     if RESULT_MODE == "flex":
         r = m2m.update("Inspection/inspectionResult", ORIG, {"xg:inRet": result})
     else:
@@ -268,7 +274,7 @@ def publish(result, boxes):
         m2m.add_cin("Inspection/defects", ORIG, {**result, "boxes": boxes})
 
 
-# ====================================================================== 서버
+# ====================================================================== server
 app = Flask(__name__)
 jobs = queue.Queue()
 detector = None
@@ -280,7 +286,7 @@ def worker():
         con = jobs.get()
         try:
             img = Image.open(io.BytesIO(base64.b64decode(con["img"]))).convert("RGB")
-        except Exception as e:  # 이미지를 못 읽으면 ERROR (리젝터는 ERROR도 리젝)
+        except Exception as e:  # unreadable image -> ERROR (the rejector rejects ERROR too)
             print("이미지 읽기 실패:", e, flush=True)
             publish(error_result(con), [])
             continue
@@ -300,7 +306,7 @@ def worker():
 
 
 @app.post("/notify")
-@app.post("/notify/<path:_rest>")  # ACME는 nu 경로를 poa 뒤에 붙여 보낼 수 있어요
+@app.post("/notify/<path:_rest>")  # ACME may append the nu path to the poa
 def notify(_rest=None):
     rep, sur, vrq = m2m.parse_notification(request.get_json(silent=True))
     if not vrq:

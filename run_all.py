@@ -1,19 +1,20 @@
-"""X-Guard 전체 한 번에 실행.
+"""Start the whole X-Guard stack in one go.
 
-    python run_all.py            # 전부 켜기 (Ctrl+C 로 전부 끄기)
-    python run_all.py --reset    # CSE DB를 지우고 처음부터
+    python run_all.py            # start everything (Ctrl+C stops everything)
+    python run_all.py --reset    # wipe the CSE database first
 
-하는 일
-  0. train/dataset/ 에 학습 데이터가 있으면 YOLOv8n 자동 학습 -> models/detect.pt (데이터가 그대로면 건너뜀)
-  1. MQTT 브로커: 1883이 비어 있으면 amqtt(파이썬 브로커)를 띄움 (Mosquitto 서비스가 켜져 있으면 그걸 씀)
-  2. ACME MN-CSE (cse/ 폴더, headless)
+Order of startup:
+  0. If train/dataset/ has data, train YOLOv8n into models/detect.pt (skipped if the data hasn't changed).
+  1. MQTT broker. If port 1883 is free, start amqtt; if Mosquitto is already running, use that.
+  2. ACME MN-CSE (cse/ folder, headless).
   3. setup_resources.py base
-  4. 게이트웨이, 이미지 AE, AI, 대시보드
-  5. 브라우저로 대시보드를 열고 알림 수신기(:9100)가 켜지면 setup_resources.py subs
-  - models/detect.pt 가 없거나 torch 가 안 깔려 있으면 AI를 MODEL_BACKEND=dummy 로 띄워요.
-  - 자동 학습을 끄려면 .env 에 AUTO_TRAIN=0
-  - dataset/ 에 이미지가 없으면 시험용 이미지 6장을 만들어요.
-각 프로그램 로그는 logs/*.log 에 쌓여요.
+  4. AI, image AE, dashboard.
+  5. Open the dashboard in a browser, wait for its receiver on :9100, then create the subscriptions.
+  6. Gateway, then the gateway's MQTT subscriptions.
+
+If models/detect.pt is missing or torch isn't installed, the AI runs with MODEL_BACKEND=dummy.
+Set AUTO_TRAIN=0 in .env to skip training. If dataset/ is empty, six test images are created.
+Each program logs to logs/<name>.log.
 """
 import importlib.util
 import os
@@ -27,7 +28,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT))
-from common import m2m  # noqa: E402  (.env / env.example 를 읽어요)
+from common import m2m  # noqa: E402  (loads .env or env.example)
 
 PY = sys.executable
 LOGS = ROOT / "logs"
@@ -42,7 +43,7 @@ def port_open(port, host="127.0.0.1"):
 
 
 def wait_port(port, name, timeout=60, proc=None, log=None):
-    """port 가 열릴 때까지 기다려요. proc 가 중간에 죽으면 바로 멈추고 로그 끝부분을 보여줘요."""
+    """Wait for a port to open. If proc dies first, stop waiting and print the end of its log."""
     t0 = time.time()
     while time.time() - t0 < timeout:
         if port_open(port):
@@ -80,7 +81,7 @@ def setup(cmd):
 
 
 def auto_train():
-    """train/dataset/ -> train/train.py --auto (출력은 콘솔에 그대로 + logs/train.log)."""
+    """Run train/train.py --auto, echoing output to the console and logs/train.log."""
     if os.getenv("AUTO_TRAIN", "1").strip() in ("0", "false", "False", "no"):
         print("  AUTO_TRAIN=0 -> 건너뜀")
         return
@@ -98,7 +99,7 @@ def auto_train():
 
 
 def ai_health():
-    """AI 가 실제로 어떤 모델을 읽었는지 확인해서 보여줘요."""
+    """Ask the AI which model it actually loaded and print it."""
     import json
     import urllib.request
     try:
@@ -111,15 +112,18 @@ def ai_health():
 
 
 def cse_db_broken():
-    """ACME DB(tinydb) 에 ct/ty 가 빠진 반쪽짜리 리소스가 있으면 True.
-    이런 기록이 있는 컨테이너가 가득 차면(mni) 오래된 것을 지우다가 ACME 가 5000 오류를 내요."""
+    """True if the ACME tinydb has half-written resources (missing ct or ty).
+
+    Once a container holding one of these hits mni, ACME fails with 5000 while
+    trying to delete the oldest entry.
+    """
     import glob
     import json
     for f in glob.glob(str(ROOT / "cse" / "data" / "resources-*.json")):
         try:
             res = json.loads(Path(f).read_text(encoding="utf-8")).get("resources", {})
         except (ValueError, OSError):
-            return True  # 파일 자체가 깨졌으면 비우는 게 맞아요
+            return True  # the file itself is corrupt, so a reset is right
         for v in res.values():
             if isinstance(v, dict) and v.get("__rtype__") and ("ct" not in v or "ty" not in v):
                 return True
@@ -131,7 +135,7 @@ def has_module(name):
 
 
 def is_torchscript(path):
-    """torch.jit.save 파일이면 True, ultralytics best.pt(torch.save) 면 False."""
+    """True for a torch.jit.save file, False for an ultralytics best.pt (torch.save)."""
     import zipfile
     try:
         with zipfile.ZipFile(path) as z:
@@ -154,7 +158,7 @@ def sample_images():
 
 
 def hw_summary():
-    """하드웨어 설정 한눈에 (하드웨어 팀 2026-11-15 기준: S1 D2, S2 D3, SG90 D9, ELP 카메라)."""
+    """Print the hardware settings (2026-11-15 rig: S1 D2, S2 D3, SG90 D9, ELP camera)."""
     port = os.getenv("SERIAL_PORT", "SIM")
     if port.upper() == "SIM":
         print("  아두이노: SIM (가짜 아두이노, 실제 장비는 .env 의 SERIAL_PORT=COM4 처럼)")
@@ -200,7 +204,8 @@ def main():
             return
 
     print("2) ACME MN-CSE")
-    # 다른 PC에서 복사해 온 CSE DB(예전 시험 결과·모델명)는 이 PC에서 처음 켤 때 한 번 비워요
+    # A CSE DB copied from another PC (old test runs, old model names) gets wiped once
+    # the first time it runs on this machine.
     owner = ROOT / "cse" / "data" / ".owner"
     me = socket.gethostname()
     if not reset and (not owner.exists() or owner.read_text(encoding="utf-8").strip() != me):
@@ -242,8 +247,8 @@ def main():
             print(f"  모델: {model.name} ({kind}, {model.stat().st_size / 1e6:.1f}MB)")
     if os.getenv("IMAGE_SOURCE", "dataset") == "camera" and not has_module("cv2"):
         print("  ! opencv 가 없어서 카메라 대신 dataset/ 사진을 써요 -> pip install opencv-python")
-    # 받는 쪽부터 순서대로 켜요. 게이트웨이(아두이노)를 먼저 켜면 AI가 모델을 읽는 동안
-    # 들어온 제품 사진을 AI가 못 받아서 TIMEOUT 이 나요.
+    # Start the receivers first. If the gateway came up first, products arriving while
+    # the AI is still loading its model would never get a verdict and would time out.
     ai_proc = start("ai", [PY, "ai/app.py"], env=ai_env)
     if not wait_port(int(os.getenv("AI_PORT", "9000")), "AI AE (모델 로드 포함)", 300, ai_proc, "ai.log"):
         return
@@ -252,7 +257,7 @@ def main():
     start("dashboard", [PY, "-m", "streamlit", "run", "dashboard/app.py", "--server.headless", "true",
                         "--server.port", "8501"])
     wait_port(8501, "대시보드 화면", 60)
-    webbrowser.open("http://localhost:8501")  # 대시보드 알림 수신기(:9100)는 화면을 열어야 켜져요
+    webbrowser.open("http://localhost:8501")  # the dashboard's :9100 receiver only starts once the page is opened
     wait_port(int(os.getenv("DASH_NOTIFY_PORT", "9100")), "대시보드 알림 수신기", 60)
 
     print("5) 구독 생성 (이미지·AI·대시보드)")
@@ -261,7 +266,7 @@ def main():
 
     print("6) 게이트웨이 (아두이노) + 게이트웨이 구독")
     start("gateway", [PY, "gateway/gateway.py"])
-    time.sleep(3)  # 게이트웨이 MQTT 연결 대기 (MQTT 구독은 게이트웨이가 켜져 있어야 만들어져요)
+    time.sleep(3)  # give the gateway time to connect; MQTT subscriptions need it online
     setup("subs-mqtt")
 
     print("\n전부 켜졌어요. 대시보드 http://localhost:8501 · ACME 웹 UI http://localhost:8080/webui")
@@ -275,8 +280,8 @@ def main():
 
 
 def stop_all():
-    # 요청을 보내는 프로그램들을 먼저 끄고, ACME(DB 를 쓰는 쪽)는 맨 나중에 꺼요.
-    # 한꺼번에 끄면 ACME 가 저장하던 기록이 반쪽만 남아 다음 실행 때 5000 오류가 나요.
+    # Stop the clients first and ACME (which writes the DB) last. Killing everything at
+    # once can leave a half-written record that causes 5000 errors on the next run.
     first = [(n, p) for n, p in procs if n not in ("acme", "mqtt")]
     last = [(n, p) for n, p in procs if n in ("acme", "mqtt")]
     for group in (list(reversed(first)), last):

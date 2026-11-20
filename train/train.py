@@ -1,20 +1,22 @@
-# X-Guard 모델 학습 (YOLOv8n) -> 컨베이어 AI 가 읽는 models/detect.pt 로 바로 저장
+# Train the X-Guard YOLOv8n model and save it straight to models/detect.pt for the AI.
 #
-#   1) train/dataset/ 에 우리 데이터를 넣어요 (형식은 train/dataset/README.md)
-#   2) run_all.bat / python run_all.py 를 실행하면 시작할 때 자동으로 학습해요 (python train/train.py --auto)
-#      PC 에 GPU 가 없으면 자동 학습은 건너뛰어요 -> Colab GPU 로: train/colab_train.ipynb, python train/colab.py -h
-#      손으로:  python train/train.py            # 같은 데이터여도 학습
-#               python train/train.py --epochs 50 --batch 8
-#               python train/train.py -h
+#   1) Put the data in train/dataset/ (layout in train/dataset/README.md).
+#   2) run_all.bat / python run_all.py trains on startup (python train/train.py --auto).
+#      Without a GPU the auto step is skipped; use Colab instead
+#      (train/colab_train.ipynb, python train/colab.py -h).
+#      By hand:  python train/train.py            # always trains, even on the same data
+#                python train/train.py --epochs 50 --batch 8
+#                python train/train.py -h
 #
-# --auto: 데이터 없음 -> 건너뜀 / 데이터·설정이 지난 학습과 같고 models/detect.pt 있음 -> 건너뜀
-#         GPU 없음 (TRAIN_DEVICE=cpu 가 아니면) -> 건너뜀 (CPU 학습은 몇 시간 걸려요)
+# --auto skips training when there is no data, when data and settings match the last
+# run and models/detect.pt exists, or when there is no GPU (unless TRAIN_DEVICE=cpu;
+# CPU training takes hours).
 #
-# 결과
-#   models/detect.pt, best.pt, classes.txt, model_info.json   ai/app.py 가 읽는 곳 (.env MODEL_PATH, CLASSES_PATH)
-#   train/models/runs/{name}/        로그, 그래프, live.png
-#   train/models/weights/{name}.pt   실험별 best 모델
-#   train/models/results.csv         실험별 test mAP 누적
+# Output:
+#   models/detect.pt, best.pt, classes.txt, model_info.json   read by ai/app.py (MODEL_PATH, CLASSES_PATH)
+#   train/models/runs/{name}/        logs, plots, live.png
+#   train/models/weights/{name}.pt   best weights per run
+#   train/models/results.csv         test mAP for every run
 import os
 import sys
 import csv
@@ -24,14 +26,14 @@ from datetime import datetime
 TRAIN_DIR = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(TRAIN_DIR)
 sys.path.append(ROOT)
-from common import m2m  # noqa: E402,F401  (.env / env.example 를 읽어요)
+from common import m2m  # noqa: E402,F401  (loads .env or env.example)
 
 from utils.args import get_args  # noqa: E402
 from utils.custom import prepare_custom, count_images, fingerprint, write_data_yaml  # noqa: E402
 from utils.deploy import read_info  # noqa: E402
 
-DATA_DIR = os.path.join(TRAIN_DIR, 'dataset')                     # 여기에 데이터를 넣어요
-CACHE_DIR = os.path.join(TRAIN_DIR, 'models', 'dataset_yolo')     # ultralytics 형식으로 바꾼 사본
+DATA_DIR = os.path.join(TRAIN_DIR, 'dataset')                     # training data goes here
+CACHE_DIR = os.path.join(TRAIN_DIR, 'models', 'dataset_yolo')     # copy converted to the ultralytics layout
 RUNS_DIR = os.path.join(TRAIN_DIR, 'models', 'runs')
 WEIGHTS_DIR = os.path.join(TRAIN_DIR, 'models', 'weights')
 RESULTS_CSV = os.path.join(TRAIN_DIR, 'models', 'results.csv')
@@ -40,7 +42,7 @@ CLASSES_PATH = os.path.join(ROOT, os.getenv('CLASSES_PATH', 'models/classes.txt'
 MODEL_DIR = os.path.dirname(MODEL_PATH)
 
 
-# 실험 1개 -> results.csv 한 줄
+# one run -> one row in results.csv
 def log_result(args, name, metrics):
     row = {
         'time': f'{datetime.now():%Y-%m-%d %H:%M}',
@@ -65,7 +67,7 @@ def log_result(args, name, metrics):
         w.writerow(row)
 
 
-# 학습 결과를 바꾸는 설정 (같으면 다시 학습할 필요 없음)
+# settings that change the result; if these match, no need to retrain
 def train_key(args):
     return {'model': args.model, 'epochs': args.epochs, 'imgsz': args.imgsz, 'aug': args.aug,
             'mosaic': args.mosaic, 'optimizer': args.optimizer, 'lr': args.lr, 'opt': args.opt}
@@ -75,7 +77,7 @@ def main():
     args = get_args(data_dir=DATA_DIR)
     src = os.path.abspath(args.data_dir)
 
-    # 0) 학습할지 결정 (torch / ultralytics 없이도 여기까지는 돌아요)
+    # 0) decide whether to train (works without torch or ultralytics installed)
     n = count_images(src)
     if not n:
         print(f'학습 데이터 없음 ({src}) -> 학습 건너뜀')
@@ -102,7 +104,7 @@ def main():
         from utils.augment import get_augmentations
         from utils.plot import LivePlot
         from utils.deploy import export_torchscript, deploy
-        get_augmentations(args.aug)   # albumentations 설치 확인
+        get_augmentations(args.aug)   # check that albumentations is installed
     except ImportError as e:
         print('!! 학습 패키지가 없어요:', e)
         print('   pip install -r train/requirements.txt  (GPU면 README 의 torch 설치 줄 먼저)')
@@ -121,7 +123,7 @@ def main():
     model = load_model(args.model)
     model.add_callback('on_fit_epoch_end', LivePlot(show=args.show))
 
-    # 3) train (끝나면 best.pt 로드된 상태)
+    # 3) train (best.pt is loaded when this returns)
     train_args = dict(
         data=data_yaml,
         epochs=args.epochs,
@@ -139,9 +141,9 @@ def main():
         exist_ok=True,
     )
     aug = get_augmentations(args.aug)
-    if aug is not None:   # None = ultralytics 기본
+    if aug is not None:   # None = ultralytics defaults
         train_args['augmentations'] = aug
-    train_args.update(args.opt)   # --opt 우선
+    train_args.update(args.opt)   # --opt wins
     model.train(**train_args)
 
     # 4) save
@@ -156,7 +158,7 @@ def main():
     print(f'test  mAP@50: {metrics.box.map50:.4f}  mAP@50:95: {metrics.box.map:.4f}')
     log_result(args, name, metrics)
 
-    # 6) ai/app.py 가 읽는 곳으로 (TorchScript 실패해도 best.pt 로 동작)
+    # 6) copy to where ai/app.py looks (if TorchScript export fails, best.pt still works)
     ts = None
     try:
         ts = export_torchscript(save_path, args.imgsz)
@@ -170,5 +172,5 @@ def main():
     return 0
 
 
-if __name__ == '__main__':   # Windows 필수 (worker가 이 파일 다시 import)
+if __name__ == '__main__':   # required on Windows, dataloader workers re-import this file
     sys.exit(main())

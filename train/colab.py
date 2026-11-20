@@ -1,10 +1,10 @@
-# Colab GPU 로 학습할 때 PC 쪽에서 쓰는 도구
+# PC-side helper for training on a Colab GPU.
 #
-#   python train/colab.py pack                       # 학습 코드 + train/dataset -> xguard_train.zip
-#   (Colab 에서 train/colab_train.ipynb 실행 -> xguard_model.zip 다운로드)
-#   python train/colab.py install xguard_model.zip   # 받은 모델을 models/ 에 넣기
+#   python train/colab.py pack                       # training code + train/dataset -> xguard_train.zip
+#   (run train/colab_train.ipynb on Colab, download xguard_model.zip)
+#   python train/colab.py install xguard_model.zip   # put the model into models/
 #
-# install 뒤에는 데이터가 같으니 run_all 이 다시 학습하지 않고 그 모델로 켜져요.
+# After install the data fingerprint matches, so run_all uses this model instead of retraining.
 import os
 import sys
 import json
@@ -19,7 +19,7 @@ SKIP_DIRS = ('__pycache__',)
 MODEL_FILES = ('detect.pt', 'best.pt', 'classes.txt', 'model_info.json')
 
 
-# PACK 목록 -> zip (zip 안 경로 = 프로젝트 루트 기준)
+# zip up everything in PACK, with paths relative to the project root
 def pack(out):
     n = 0
     with zipfile.ZipFile(out, 'w', zipfile.ZIP_DEFLATED) as z:
@@ -38,7 +38,7 @@ def pack(out):
     print('-> Colab 에서 train/colab_train.ipynb 를 열고 이 zip 을 올려 주세요 (또는 Google Drive 내 드라이브에 복사).')
 
 
-# Colab 이 만든 zip 에서 models/ 파일만 꺼내기
+# pull just the model files out of the zip Colab made
 def install(src):
     out_dir = os.path.join(ROOT, 'models')
     os.makedirs(out_dir, exist_ok=True)

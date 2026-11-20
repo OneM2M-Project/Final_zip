@@ -14,17 +14,17 @@ xguard_model.zip
 models/best.pt
 models/detect_old.pt
 
-# 가상환경 백업 (다른 PC에서 복사해 온 깨진 .venv)
+# venv backup (a broken .venv copied from another PC)
 .venv_broken/
 
-# 이미지 / 이미지 묶음
+# images and image archives
 *.png
 *.jpg
 *.jpeg
 *.bmp
 train/*.zip
 
-# 백업·예전 복사본
+# backups and old copies
 *.bak
 .gitignore.orig
 onem2m-conveyor/

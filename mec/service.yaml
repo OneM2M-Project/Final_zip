@@ -8,4 +8,4 @@ spec:
   ports:
     - port: 9000
       targetPort: 9000
-      nodePort: 30900     # MN-CSE가 알림을 보낼 주소: http://<VM_IP>:30900/notify
+      nodePort: 30900     # MN-CSE sends notifications to http://<VM_IP>:30900/notify

@@ -1,22 +1,26 @@
-"""X-Guard 이미지 AE (ImageSource-01, CImageSource01).
+"""X-Guard image AE (ImageSource-01, origin CImageSource01).
 
-③ arrivals 구독 알림(sub-image)을 받으면 ④ 그 제품 번호의 X-ray 이미지를
-640x640 이하 JPEG(base64)로 줄여 xrayImages 컨테이너에 cin으로 올려요.
+When an arrivals notification comes in (sub-image, step 3), it grabs the image for that
+product, shrinks it to a JPEG no bigger than 640x640, and posts it as a base64 cin to the
+xrayImages container (step 4).
 
-이미지 가져오는 곳 (.env 의 IMAGE_SOURCE)
-  dataset (기본) dataset/ 의 이미지를 파일 이름순으로 정렬해 seq번째(1부터, 끝나면 처음부터 반복).
-                 예) dataset/01_normal.jpg, 02_knife.jpg, ...  비어 있으면 회색 시험용 이미지.
-  camera         USB 카메라(ELP OV9281 850nm, CAMERA_INDEX)에서 도착 알림 CAPTURE_DELAY_MS 뒤의 프레임.
-                 카메라를 못 열면 dataset 으로 대신해요. SAVE_CAPTURES=1 이면 captures/ 에 저장 (학습 데이터 모으기).
+IMAGE_SOURCE in .env picks where images come from:
+  dataset  default. Files in dataset/ sorted by name; seq 1 is the first file, and it wraps
+           around at the end (e.g. 01_normal.jpg, 02_knife.jpg). Empty folder -> gray test image.
+  camera   USB camera (ELP OV9281, 850 nm, CAMERA_INDEX), frame taken CAPTURE_DELAY_MS after
+           the arrival. Falls back to dataset if the camera won't open. SAVE_CAPTURES=1 also
+           writes each frame to captures/ so it can be used for training.
 
-우리 하드웨어 (2026-11-15 하드웨어 팀 확인)
-  - 카메라는 벨트 옆에 달고 반대편 옆에서 850nm 조명을 비춰 제품을 옆으로 투과 촬영해요.
-  - ELP 는 Windows 에서 MSMF 방식 1번으로 열어야 화면이 나와요 (DSHOW 로 열면 새까맣게 나왔음).
-    -> CAMERA_BACKEND=MSMF, CAMERA_INDEX=1, CAMERA_FOURCC=MJPG
-  - 카메라를 거꾸로 달아서 학습 사진은 180도 돌려 찍었어요. 라인에서도 같게 -> CAMERA_ROTATE=180
-    (학습 사진과 방향이 다르면 AI 가 못 맞혀요. 방향을 바꾸면 학습 사진도 같은 방향이어야 해요.)
+Our rig, as confirmed by the hardware team on 2026-11-15:
+  - The camera sits beside the belt and the 850 nm light is on the opposite side, so products
+    are shot side-on with light coming through them.
+  - On Windows the ELP only gives a picture when opened as index 1 with MSMF. DSHOW gave a
+    black frame. So CAMERA_BACKEND=MSMF, CAMERA_INDEX=1, CAMERA_FOURCC=MJPG.
+  - The camera is mounted upside down and the training photos were rotated 180 degrees, so
+    the line uses CAMERA_ROTATE=180 too. If the orientation doesn't match the training photos
+    the model gets it wrong.
 
-실행: python gateway/image_source.py
+Run: python gateway/image_source.py
 """
 import base64
 import io
@@ -44,12 +48,12 @@ SOURCE = os.getenv("IMAGE_SOURCE", "dataset").lower()
 CAMERA_INDEX = int(os.getenv("CAMERA_INDEX", "0"))
 CAMERA_W, CAMERA_H = int(os.getenv("CAMERA_WIDTH", "1280")), int(os.getenv("CAMERA_HEIGHT", "800"))
 CAPTURE_DELAY = int(os.getenv("CAPTURE_DELAY_MS", "0")) / 1000
-# 카메라 여는 방식: MSMF | DSHOW | ANY (Windows 에서 우리 ELP 는 MSMF)
+# capture backend: MSMF | DSHOW | ANY (our ELP needs MSMF on Windows)
 CAMERA_BACKEND = os.getenv("CAMERA_BACKEND", "MSMF").upper()
-CAMERA_FOURCC = os.getenv("CAMERA_FOURCC", "MJPG").upper()      # MJPG | YUY2 | 빈칸(카메라 기본)
-CAMERA_ROTATE = int(os.getenv("CAMERA_ROTATE", "0") or 0)       # 0 | 90 | 180 | 270 (시계 방향)
-CAMERA_FLIP = os.getenv("CAMERA_FLIP", "").lower()              # 빈칸 | h(좌우) | v(상하)
-CAMERA_EXPOSURE = os.getenv("CAMERA_EXPOSURE", "").strip()      # 빈칸 = 자동 노출, 예) -6
+CAMERA_FOURCC = os.getenv("CAMERA_FOURCC", "MJPG").upper()      # MJPG | YUY2 | empty = camera default
+CAMERA_ROTATE = int(os.getenv("CAMERA_ROTATE", "0") or 0)       # 0 | 90 | 180 | 270, clockwise
+CAMERA_FLIP = os.getenv("CAMERA_FLIP", "").lower()              # empty | h (horizontal) | v (vertical)
+CAMERA_EXPOSURE = os.getenv("CAMERA_EXPOSURE", "").strip()      # empty = auto exposure, e.g. -6
 SAVE_CAPTURES = os.getenv("SAVE_CAPTURES", "0") == "1"
 CAPTURE_DIR = ROOT / "captures"
 
@@ -57,18 +61,18 @@ app = Flask(__name__)
 
 
 class Camera:
-    """프레임을 계속 읽어 최신 것만 들고 있어요 (버퍼에 쌓인 옛 프레임을 보내지 않게)."""
+    """Reads frames nonstop and keeps only the newest, so we never send a stale buffered frame."""
 
     def __init__(self, index):
-        # MSMF 는 처음 열 때 하드웨어 변환 준비로 10~30초 걸릴 수 있어 끈다 (cv2 import 전에)
+        # MSMF hardware transforms can add 10-30 s to the first open. Turn them off before importing cv2.
         os.environ.setdefault("OPENCV_VIDEOIO_MSMF_ENABLE_HW_TRANSFORMS", "0")
-        import cv2  # opencv-python (ultralytics 를 깔면 같이 깔려요)
+        import cv2  # opencv-python, installed along with ultralytics
         self.cv2 = cv2
         backends = {"MSMF": cv2.CAP_MSMF, "DSHOW": cv2.CAP_DSHOW, "ANY": cv2.CAP_ANY}
         order = [CAMERA_BACKEND] if os.name == "nt" else ["ANY"]
         order += [b for b in ("MSMF", "DSHOW", "ANY") if b not in order and os.name == "nt"]
         self.cap, self.backend = None, None
-        for b in order:  # 지정한 방식이 안 되면 다른 방식으로 한 번씩 더 시도
+        for b in order:  # if the chosen backend fails, try each of the others once
             cap = cv2.VideoCapture(index, backends.get(b, cv2.CAP_ANY))
             if cap.isOpened():
                 self.cap, self.backend = cap, b
@@ -80,7 +84,7 @@ class Camera:
             self.cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*CAMERA_FOURCC[:4].ljust(4)))
         self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, CAMERA_W)
         self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, CAMERA_H)
-        if CAMERA_EXPOSURE:  # 수동 노출 (방식에 따라 안 먹힐 수 있음)
+        if CAMERA_EXPOSURE:  # manual exposure; some backends ignore it
             self.cap.set(cv2.CAP_PROP_AUTO_EXPOSURE, 0.25)
             self.cap.set(cv2.CAP_PROP_EXPOSURE, float(CAMERA_EXPOSURE))
         self.frame, self.lock = None, threading.Lock()
@@ -88,7 +92,7 @@ class Camera:
         threading.Thread(target=self._check, daemon=True).start()
 
     def _check(self):
-        """3초 뒤 화면 크기·밝기를 찍어 줘요. 새까마면 방식(CAMERA_BACKEND)이나 조명을 확인."""
+        """After 3 s, print the frame size and brightness. A black frame usually means the wrong backend or no light."""
         time.sleep(3)
         with self.lock:
             f = None if self.frame is None else self.frame.copy()
@@ -126,12 +130,12 @@ class Camera:
                 time.sleep(0.05)
 
     def grab(self):
-        """최신 프레임 -> PIL RGB (흑백 카메라도 3채널로)."""
+        """Newest frame as a PIL RGB image (grayscale is expanded to 3 channels)."""
         with self.lock:
             f = None if self.frame is None else self.frame.copy()
         if f is None:
             return None
-        f = self._orient(f)  # 학습 사진과 같은 방향으로
+        f = self._orient(f)  # match the orientation of the training photos
         if f.ndim == 2:
             f = self.cv2.cvtColor(f, self.cv2.COLOR_GRAY2RGB)
         else:
@@ -149,7 +153,7 @@ def image_files():
 
 
 def encode(path_or_img):
-    """이미지(파일 경로 또는 PIL)를 640 이하로 줄이고 JPEG base64 문자열로."""
+    """Shrink an image (path or PIL) to at most 640 px and return it as a base64 JPEG string."""
     if isinstance(path_or_img, Image.Image):
         img = path_or_img
     elif path_or_img:
@@ -164,7 +168,7 @@ def encode(path_or_img):
 
 def from_camera(seq):
     if CAPTURE_DELAY:
-        time.sleep(CAPTURE_DELAY)  # 센서 -> 카메라 화면 가운데까지 가는 시간
+        time.sleep(CAPTURE_DELAY)  # travel time from the sensor to the middle of the frame
     img = camera.grab()
     if img is None:
         return None, None
@@ -178,7 +182,7 @@ def from_camera(seq):
 def upload(con):
     seq = int(con["seq"])
     name, src = from_camera(seq) if camera else (None, None)
-    if src is None:  # dataset 모드 (또는 카메라 프레임이 아직 없음)
+    if src is None:  # dataset mode, or no camera frame yet
         files = image_files()
         path = files[(seq - 1) % len(files)] if files else None
         name, src = (path.name if path else "blank.jpg"), path
@@ -190,13 +194,13 @@ def upload(con):
 
 
 @app.post("/notify")
-@app.post("/notify/<path:_rest>")  # ACME는 nu 경로를 poa 뒤에 붙여 보낼 수 있어요
+@app.post("/notify/<path:_rest>")  # ACME may append the nu path to the poa
 def notify(_rest=None):
     rep, sur, vrq = m2m.parse_notification(request.get_json(silent=True))
     if not vrq:
         con = m2m.content_of(rep)
         if con and "seq" in con:
-            # 바로 200을 돌려주고 업로드는 따로 (CSE가 알림 응답을 오래 기다리지 않게)
+            # reply 200 right away and upload in the background so the CSE isn't kept waiting
             threading.Thread(target=upload, args=(con,), daemon=True).start()
     return m2m.notify_ok()
 
